@@ -1,6 +1,6 @@
 ﻿
 # Cache Buster: 2026-11-11-00-37-15
-"""KADA UAM Aircraft Transition FlightConfigurator."""
+"""KADA UAM Aircraft Transition FlightConfigurator"""
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -295,7 +295,7 @@ c3.metric("Stability", "STABLE" if props.get_static_margin() > 0 else "UNSTABLE"
 c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
 
 # ==========================================================
-# 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
+# 3D COORDINATE FRAME & CAD  MODEL VISUALIZATION
 # ==========================================================
 import trimesh
 
