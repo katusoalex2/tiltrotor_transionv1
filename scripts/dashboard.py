@@ -1,12 +1,13 @@
 ﻿
 # Cache Buster: 2026-11-11-00-37-15
-"""KADA UAM Aircraft Configurator."""
+"""KADA UAM Aircraft Transition FlightConfigurator."""
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
 import sys
 import os
+import plotly.graph_objects as go
 
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,8 +99,8 @@ class FullCascadePID:
                 "tilt": ref_tilt, "delta_left": vtail_cmd, "delta_right": vtail_cmd, 
                 "desired_pitch": desired_pitch}
 
-st.set_page_config(page_title="Ultimate Configurator", layout="wide")
-st.title(" KADA Ultimate UAM Aircraft Configurator")
+st.set_page_config(page_title="Ultimate Transition phase Configurator", layout="wide")
+st.title(" KADA UAM Aircraft Transition phase Configurator")
 
 st.sidebar.title(" Parameters")
 side_tabs = st.sidebar.tabs(["Body", "Prop", "Geom", "Aero", "PID", "Gust"])
@@ -297,8 +298,8 @@ c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
 # 3D COORDINATE FRAME VISUALIZATION
 # ==========================================================
 st.markdown("---")
-st.subheader("🗺️ 3D Coordinate Systems (Inertial NED vs. Body Frame)")
-st.markdown("This shows the Earth-Fixed NED frame (X=North, Y=East, Z=Down) and the rotating Body Frame (X=Nose, Y=Wing, Z=Belly).")
+st.subheader("3D Coordinate Systems (Inertial NED vs. Body Frame)")
+st.markdown("This shows the Earth-Fixed NED frame used (X=North, Y=East, Z=Down) and the rotating Body Frame (X=Nose, Y=Wing, Z=Belly).")
 
 # Create a slider to let the user scrub through time
 time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
