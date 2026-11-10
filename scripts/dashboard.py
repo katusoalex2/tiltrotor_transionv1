@@ -1,5 +1,5 @@
 """Ultimate Aircraft Configurator - Full Parameters + Intermittent Gusts."""
-
+###### click here to open the dashboard: http://103.218.163.203:8501 
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -86,7 +86,7 @@ class FullCascadePID:
                 "desired_pitch": desired_pitch}
 
 st.set_page_config(page_title="Ultimate Configurator", layout="wide")
-st.title("?? Ultimate UAM Aircraft Configurator")
+st.title(" KADA Ultimate UAM Aircraft Configurator")
 
 # ==========================================================
 # LEFT SIDEBAR - 7 TABS
