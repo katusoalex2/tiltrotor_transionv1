@@ -295,57 +295,87 @@ c3.metric("Stability", "STABLE" if props.get_static_margin() > 0 else "UNSTABLE"
 c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
 
 # ==========================================================
-# 3D COORDINATE FRAME VISUALIZATION
+# 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
 # ==========================================================
-st.markdown("---")
-st.subheader("3D Coordinate Systems (Inertial NED vs. Body Frame)")
-st.markdown("This shows the Earth-Fixed NED frame used (X=North, Y=East, Z=Down) and the rotating Body Frame (X=Nose, Y=Wing, Z=Belly).")
+import trimesh
 
-# Create a slider to let the user scrub through time
+st.markdown("---")
+st.subheader("3D Aircraft & Coordinate Systems")
+st.markdown("The Earth frame is fixed (Red/Green/Blue). The UAM rotates based on the flight telemetry.")
+
 time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
 idx = np.argmin(np.abs(data["t"] - time_idx))
 
-# Get the attitude at this specific time
 current_pitch = data["pitch"][idx]
 current_roll = data["roll"][idx]
 current_yaw = data["yaw"][idx]
 
-# Build 3D Plotly figure
-fig_3d = go.Figure()
-
-# 1. Inertial NED Frame (Fixed to the Earth)
-# X=North, Y=East, Z=Down
-fig_3d.add_trace(go.Scatter3d(x=[0, 2], y=[0, 0], z=[0, 0], mode='lines', line=dict(color='red', width=5), name='NED X (North)'))
-fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 2], z=[0, 0], mode='lines', line=dict(color='green', width=5), name='NED Y (East)'))
-fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 0], z=[0, 2], mode='lines', line=dict(color='blue', width=5), name='NED Z (Down)'))
-
-# 2. Body Frame (Rotated by current Euler angles)
-# We use the same rotation matrix as the physics engine
+# Rotation matrix at this exact moment
 R = rotation_body_to_earth(np.deg2rad(current_roll), np.deg2rad(current_pitch), np.deg2rad(current_yaw))
 
-# Body X (Nose)
-bx = R @ np.array([1.5, 0, 0])
-fig_3d.add_trace(go.Scatter3d(x=[0, bx[0]], y=[0, bx[1]], z=[0, bx[2]], mode='lines', line=dict(color='orange', width=8), name='Body X (Nose)'))
-# Body Y (Right Wing)
-by = R @ np.array([0, 1.5, 0])
-fig_3d.add_trace(go.Scatter3d(x=[0, by[0]], y=[0, by[1]], z=[0, by[2]], mode='lines', line=dict(color='purple', width=8), name='Body Y (Wing)'))
-# Body Z (Belly)
-bz = R @ np.array([0, 0, 1.5])
-fig_3d.add_trace(go.Scatter3d(x=[0, bz[0]], y=[0, bz[1]], z=[0, bz[2]], mode='lines', line=dict(color='cyan', width=8), name='Body Z (Belly)'))
+fig_3d = go.Figure()
 
-# Update layout for a clean 3D view
+# --- 1. Inertial NED Frame ---
+fig_3d.add_trace(go.Scatter3d(x=[0, 3], y=[0, 0], z=[0, 0], mode='lines', line=dict(color='red', width=4), name='Earth X (North)'))
+fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 3], z=[0, 0], mode='lines', line=dict(color='green', width=4), name='Earth Y (East)'))
+fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 0], z=[0, 3], mode='lines', line=dict(color='blue', width=4), name='Earth Z (Down)'))
+
+# --- 2. Body Frame Axes ---
+bx = R @ np.array([1.5, 0, 0])
+fig_3d.add_trace(go.Scatter3d(x=[0, bx[0]], y=[0, bx[1]], z=[0, bx[2]], mode='lines', line=dict(color='orange', width=6), name='Body X'))
+by = R @ np.array([0, 1.5, 0])
+fig_3d.add_trace(go.Scatter3d(x=[0, by[0]], y=[0, by[1]], z=[0, by[2]], mode='lines', line=dict(color='purple', width=6), name='Body Y'))
+bz = R @ np.array([0, 0, 1.5])
+fig_3d.add_trace(go.Scatter3d(x=[0, bz[0]], y=[0, bz[1]], z=[0, bz[2]], mode='lines', line=dict(color='cyan', width=6), name='Body Z'))
+
+# --- 3. The CAD STL Model (Auto-Centered & Scaled) ---
+stl_path = os.path.join(base_dir, "configs", "uam_model.stl")
+
+if os.path.exists(stl_path):
+    try:
+        mesh = trimesh.load(stl_path)
+        
+        # 1. Center the model at origin (0,0,0)
+        vertices = mesh.vertices - mesh.centroid
+        
+        # 2. Scale the model to fit the view (max dimension = 2.0 meters)
+        scale_factor = 2.0 / np.max(np.abs(vertices))
+        vertices = vertices * scale_factor
+        
+        faces = mesh.faces
+        
+        # 3. Rotate using the DCM
+        rotated_vertices = (R @ vertices.T).T
+        
+        # 4. Plot
+        fig_3d.add_trace(go.Mesh3d(
+            x=rotated_vertices[:, 0], 
+            y=rotated_vertices[:, 1], 
+            z=rotated_vertices[:, 2],
+            i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+            color='steelblue',
+            opacity=1.0,
+            name='UAM CAD Model'
+        ))
+        st.success("✅ CAD Model loaded and centered successfully!")
+    except Exception as e:
+        st.error(f"Error loading STL: {e}")
+else:
+    st.warning(f"⚠️ CAD model not found at {stl_path}")
+
+# --- Layout ---
 fig_3d.update_layout(
     scene=dict(
         xaxis_title='North (X)',
         yaxis_title='East (Y)',
         zaxis_title='Down (Z)',
-        xaxis=dict(range=[-2, 2]),
-        yaxis=dict(range=[-2, 2]),
-        zaxis=dict(range=[-2, 2]),
+        xaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
+        yaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
+        zaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
         aspectmode='cube'
     ),
     margin=dict(l=0, r=0, b=0, t=0),
-    height=500
+    height=600
 )
 
 st.plotly_chart(fig_3d, use_container_width=True)
