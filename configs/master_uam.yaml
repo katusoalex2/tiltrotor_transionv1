@@ -1,0 +1,71 @@
+body:
+  mass_kg: 5.0
+  cg_offset_mm:
+  - 0
+  - 0
+  - 0
+  inertia:
+    Ixx: 0.15
+    Iyy: 0.25
+    Izz: 0.4
+propulsion:
+  num_rotors: 4
+  prop_diameter_inches: 12.0
+  motor_kv: 920
+  battery_voltage: 22.2
+  thrust_coefficient: 1.0e-05
+  max_rpm: 3000.0
+geometry:
+  motors:
+  - id: 1
+    x: 0.3
+    y: 0.4
+    z: 0.0
+    tilts: true
+  - id: 2
+    x: 0.3
+    y: -0.4
+    z: 0.0
+    tilts: true
+  - id: 3
+    x: -0.3
+    y: 0.4
+    z: 0.0
+    tilts: false
+  - id: 4
+    x: -0.3
+    y: -0.4
+    z: 0.0
+    tilts: false
+  max_tilt_rate_deg_s: 20.0
+aerodynamics:
+  wing_area_m2: 1.5
+  aspect_ratio: 6.0
+  lift_slope: 4.0
+  drag_coeff: 0.02
+  stall_angle_deg: 15.0
+vtail:
+  area_m2: 0.1
+  dihedral_deg: 35.0
+  arm_length_m: 0.5
+  max_deflection_deg: 25.0
+  servo_rate_deg_s: 300.0
+environment:
+  air_density: 1.225
+  gravity: 9.81
+  wind_sigma: 1.5
+  wind_direction_deg: 45.0
+controller:
+  alt_pid:
+    kp: 0.0
+    ki: 4.0
+    kd: 0.1
+  speed_pid:
+    kp: 5.0
+    ki: 2.0
+    kd: 1.0
+  pitch_pid:
+    kp: 0.6
+    ki: 0.05
+    kd: 1.05
+  max_pitch_cmd_deg: 9.0

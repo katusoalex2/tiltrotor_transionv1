@@ -1,0 +1,30 @@
+# AIRCRAFT CONFIGURATION FORM
+# Fill in the numbers below. The code will read these automatically.
+
+# --- Aircraft Physical Properties ---
+mass: 5.0                 # kg
+inertia_xx: 0.1           # kg*m^2 (Roll)
+inertia_yy: 0.1           # kg*m^2 (Pitch)
+inertia_zz: 0.2           # kg*m^2 (Yaw)
+flap: 0.0                 # Placeholder 
+
+# --- Rotor & Motor Properties ---
+motor_location_x: 0.3     # meters forward of CG
+motor_location_y: 0.3     # meters right of CG
+motor_location_z: 0.0     # meters down of CG
+k_thrust: 0.00001         # Rotor thrust coefficient (k)
+max_omega: 3000.0         # Maximum motor RPM (rad/s)
+max_tilt_rate: 0.35       # Maximum tilt speed (rad/s)
+
+# --- Cruise Altitude Settings ---
+cruise_altitude: 700.0    # Target altitude in meters
+
+# --- PID Gains: HOVER (Tilt = 0 deg) ---
+hover_kp: 1.2
+hover_ki: 0.1
+hover_kd: 0.9
+
+# --- PID Gains: CRUISE (Tilt = 90 deg) ---
+cruise_kp: 0.05
+cruise_ki: 0.001
+cruise_kd: 0.001
