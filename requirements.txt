@@ -1,0 +1,8 @@
+﻿numpy
+scipy
+matplotlib
+plotly
+pyyaml
+pytest
+streamlit
+casadi
