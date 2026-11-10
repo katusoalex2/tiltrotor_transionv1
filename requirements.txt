@@ -6,3 +6,4 @@ pyyaml
 pytest
 streamlit
 casadi
+trimesh
