@@ -1,4 +1,4 @@
-"""KADA Ultimate UAM Aircraft Configurator."""
+"""KADA UAM Aircraft Configurator."""
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
