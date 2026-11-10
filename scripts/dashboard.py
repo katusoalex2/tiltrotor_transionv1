@@ -1,3 +1,4 @@
+﻿# Cache Buster: 2026-11-11-00-37-15
 """KADA UAM Aircraft Configurator."""
 import streamlit as st
 import numpy as np
@@ -288,3 +289,4 @@ c1.metric("Total Mass", f"{props.total_mass:.2f} kg")
 c2.metric("Static Margin", f"{props.get_static_margin():.3f} m")
 c3.metric("Stability", "STABLE" if props.get_static_margin() > 0 else "UNSTABLE")
 c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
+
