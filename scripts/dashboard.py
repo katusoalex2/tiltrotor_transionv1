@@ -84,6 +84,43 @@ class FullCascadePID:
         
         return {"omega": omega_cmd, "tilt": ref_tilt, "delta_left": vtail_cmd, "delta_right": vtail_cmd, 
                 "desired_pitch": desired_pitch}
+def update_source_files(new_cfg):
+    """Writes the new parameters back into the actual Python source files."""
+    import re
+    
+    # 1. Update configs/blue_uam.yaml
+    with open(cfg_path, "w") as f:
+        yaml.dump(new_cfg, f)
+        
+    # 2. Update the dashboard defaults (this file)
+    with open(__file__, "r") as f:
+        source = f.read()
+
+    # Replace default Mass
+    source = re.sub(r'cfg\.get\(["\']mass["\'],\s*[\d\.]+\)', f'cfg.get("mass", {new_cfg["mass"]})', source)
+    # Replace default Inertias
+    source = re.sub(r'cfg\.get\(["\']inertia_xx["\'],\s*[\d\.]+\)', f'cfg.get("inertia_xx", {new_cfg["inertia_xx"]})', source)
+    source = re.sub(r'cfg\.get\(["\']inertia_yy["\'],\s*[\d\.]+\)', f'cfg.get("inertia_yy", {new_cfg["inertia_yy"]})', source)
+    source = re.sub(r'cfg\.get\(["\']inertia_zz["\'],\s*[\d\.]+\)', f'cfg.get("inertia_zz", {new_cfg["inertia_zz"]})', source)
+    
+    # Replace Propulsion defaults
+    source = re.sub(r'st\.number_input\("Battery \(S\)",\s*value=\d+', f'st.number_input("Battery (S)", value={new_cfg["battery_cells"]}', source)
+    source = re.sub(r'st\.number_input\("Motor KV",\s*value=\d+', f'st.number_input("Motor KV", value={new_cfg["motor_kv"]}', source)
+    source = re.sub(r'st\.number_input\("Prop Dia \(in\)",\s*value=[\d\.]+', f'st.number_input("Prop Dia (in)", value={new_cfg["prop_dia"]}', source)
+
+    # Replace Aero defaults
+    source = re.sub(r'st\.number_input\("Wingspan \(m\)",\s*value=[\d\.]+', f'st.number_input("Wingspan (m)", value={new_cfg["wingspan"]}', source)
+    source = re.sub(r'st\.number_input\("Chord \(m\)",\s*value=[\d\.]+', f'st.number_input("Chord (m)", value={new_cfg["chord"]}', source)
+    source = re.sub(r'st\.number_input\("V-Tail Area",\s*value=[\d\.]+', f'st.number_input("V-Tail Area", value={new_cfg["vtail_area"]}', source)
+    source = re.sub(r'st\.number_input\("V-Tail Arm \(m\)",\s*value=[\d\.]+', f'st.number_input("V-Tail Arm (m)", value={new_cfg["vtail_arm"]}', source)
+
+    # Replace PID defaults
+    source = re.sub(r'st\.number_input\("Alt Kp",\s*value=[\d\.]+', f'st.number_input("Alt Kp", value={new_cfg["alt_kp"]}', source)
+    source = re.sub(r'st\.number_input\("Att Kp",\s*value=[\d\.]+', f'st.number_input("Att Kp", value={new_cfg["att_kp"]}', source)
+    
+    # 3. Write the modified source back to this file
+    with open(__file__, "w") as f:
+        f.write(source)
 
 st.set_page_config(page_title="Ultimate Configurator", layout="wide")
 st.title(" KADA Ultimate UAM Aircraft Configurator")
@@ -159,6 +196,22 @@ with side_tabs[5]:
     else:
         st.info("Gust randomized per run.")
         gust_start, gust_duration, gust_mag, gust_dir = 0, 0, 0, "Front"
+
+    # ==========================================================
+# SAVE TO SOURCE BUTTON
+# ==========================================================
+if st.sidebar.button("Update Source Code", use_container_width=True):
+    new_cfg = {
+        'mass': mass, 'inertia_xx': i_xx, 'inertia_yy': i_yy, 'inertia_zz': i_zz,
+        'battery_cells': battery_cells, 'motor_kv': motor_kv, 'prop_dia': prop_dia,
+        'wingspan': wingspan, 'chord': chord, 'vtail_area': vtail_area, 'vtail_arm': vtail_arm,
+        'alt_kp': alt_kp, 'alt_ki': alt_ki, 'alt_kd': alt_kd,
+        'spd_kp': spd_kp, 'spd_ki': spd_ki, 'spd_kd': spd_kd,
+        'att_kp': att_kp, 'att_ki': att_ki, 'att_kd': att_kd,
+        'rate_kp': rate_kp, 'rate_ki': rate_ki, 'rate_kd': rate_kd,
+    }
+    update_source_files(new_cfg)
+    st.sidebar.success("✅ Source files updated! Refresh the page to see the new defaults.")
 
 # ==========================================================
 # SIMULATION
