@@ -1,4 +1,5 @@
-﻿# Cache Buster: 2026-11-11-00-37-15
+﻿
+# Cache Buster: 2026-11-11-00-37-15
 """KADA UAM Aircraft Configurator."""
 import streamlit as st
 import numpy as np
@@ -6,6 +7,7 @@ import matplotlib.pyplot as plt
 import yaml
 import sys
 import os
+
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 cfg_path = os.path.join(base_dir, "configs", "blue_uam.yaml")
@@ -19,6 +21,7 @@ from src.aero.aerodynamics import AeroModel
 from src.control.trajectory import ReferenceTrajectory
 from src.control.pid import PIDController
 from src.dynamics.mass_properties import MassProperties
+from src.dynamics.frames import rotation_body_to_earth 
 
 with open(cfg_path, "r") as f:
     cfg = yaml.safe_load(f)
@@ -290,3 +293,58 @@ c2.metric("Static Margin", f"{props.get_static_margin():.3f} m")
 c3.metric("Stability", "STABLE" if props.get_static_margin() > 0 else "UNSTABLE")
 c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
 
+# ==========================================================
+# 3D COORDINATE FRAME VISUALIZATION
+# ==========================================================
+st.markdown("---")
+st.subheader("🗺️ 3D Coordinate Systems (Inertial NED vs. Body Frame)")
+st.markdown("This shows the Earth-Fixed NED frame (X=North, Y=East, Z=Down) and the rotating Body Frame (X=Nose, Y=Wing, Z=Belly).")
+
+# Create a slider to let the user scrub through time
+time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
+idx = np.argmin(np.abs(data["t"] - time_idx))
+
+# Get the attitude at this specific time
+current_pitch = data["pitch"][idx]
+current_roll = data["roll"][idx]
+current_yaw = data["yaw"][idx]
+
+# Build 3D Plotly figure
+fig_3d = go.Figure()
+
+# 1. Inertial NED Frame (Fixed to the Earth)
+# X=North, Y=East, Z=Down
+fig_3d.add_trace(go.Scatter3d(x=[0, 2], y=[0, 0], z=[0, 0], mode='lines', line=dict(color='red', width=5), name='NED X (North)'))
+fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 2], z=[0, 0], mode='lines', line=dict(color='green', width=5), name='NED Y (East)'))
+fig_3d.add_trace(go.Scatter3d(x=[0, 0], y=[0, 0], z=[0, 2], mode='lines', line=dict(color='blue', width=5), name='NED Z (Down)'))
+
+# 2. Body Frame (Rotated by current Euler angles)
+# We use the same rotation matrix as the physics engine
+R = rotation_body_to_earth(np.deg2rad(current_roll), np.deg2rad(current_pitch), np.deg2rad(current_yaw))
+
+# Body X (Nose)
+bx = R @ np.array([1.5, 0, 0])
+fig_3d.add_trace(go.Scatter3d(x=[0, bx[0]], y=[0, bx[1]], z=[0, bx[2]], mode='lines', line=dict(color='orange', width=8), name='Body X (Nose)'))
+# Body Y (Right Wing)
+by = R @ np.array([0, 1.5, 0])
+fig_3d.add_trace(go.Scatter3d(x=[0, by[0]], y=[0, by[1]], z=[0, by[2]], mode='lines', line=dict(color='purple', width=8), name='Body Y (Wing)'))
+# Body Z (Belly)
+bz = R @ np.array([0, 0, 1.5])
+fig_3d.add_trace(go.Scatter3d(x=[0, bz[0]], y=[0, bz[1]], z=[0, bz[2]], mode='lines', line=dict(color='cyan', width=8), name='Body Z (Belly)'))
+
+# Update layout for a clean 3D view
+fig_3d.update_layout(
+    scene=dict(
+        xaxis_title='North (X)',
+        yaxis_title='East (Y)',
+        zaxis_title='Down (Z)',
+        xaxis=dict(range=[-2, 2]),
+        yaxis=dict(range=[-2, 2]),
+        zaxis=dict(range=[-2, 2]),
+        aspectmode='cube'
+    ),
+    margin=dict(l=0, r=0, b=0, t=0),
+    height=500
+)
+
+st.plotly_chart(fig_3d, use_container_width=True)
