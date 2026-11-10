@@ -1,4 +1,4 @@
-import sys, os
+same import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import matplotlib
 matplotlib.use('TkAgg') # Force a visible window
