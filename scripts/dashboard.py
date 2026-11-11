@@ -8,14 +8,19 @@ import yaml
 import sys
 import os
 import plotly.graph_objects as go
+
+# ==========================================================
+# 1. FIX PATH FIRST (Crucial for Streamlit Cloud)
+# ==========================================================
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
+
+# ==========================================================
+# 2. NOW IMPORT SRC MODULES
+# ==========================================================
 from src.aero.airfoil import generate_naca4
 from src.dynamics.cad_geometry import CadGeometry
-
-
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-cfg_path = os.path.join(base_dir, "configs", "blue_uam.yaml")
-sys.path.append(base_dir)
-
 from src.dynamics.state import AircraftState
 from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
@@ -26,7 +31,10 @@ from src.control.pid import PIDController
 from src.dynamics.mass_properties import MassProperties
 from src.dynamics.frames import rotation_body_to_earth
 
-
+# ==========================================================
+# 3. LOAD CONFIG
+# ==========================================================
+cfg_path = os.path.join(base_dir, "configs", "blue_uam.yaml")
 with open(cfg_path, "r") as f:
     cfg = yaml.safe_load(f)
 # Initialize the CAD Geometry engine
