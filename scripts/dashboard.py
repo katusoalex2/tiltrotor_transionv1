@@ -388,7 +388,7 @@ else:
 import trimesh
 
 st.markdown("---")
-st.subheader("🗺️ 3D Aircraft & Coordinate Systems")
+st.subheader("3D Aircraft & Coordinate Systems")
 st.markdown("The Earth frame is fixed (Red/Green/Blue). The UAM rotates based on the flight telemetry.")
 
 time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
@@ -474,7 +474,7 @@ st.plotly_chart(fig_3d, use_container_width=True)
 from src.aero.airfoil import generate_naca4, parse_airfoil_file
 
 st.markdown("---")
-st.subheader("📐 3D CAD Geometry & Control Surfaces")
+st.subheader(" 3D CAD Geometry & Control Surfaces")
 
 # --- AIRFOIL SELECTION ---
 st.markdown("### 1. Airfoil Selection")
