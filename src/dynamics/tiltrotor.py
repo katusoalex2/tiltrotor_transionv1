@@ -33,16 +33,20 @@ class TiltrotorDynamics:
         arm = 0.4
         moment_roll = ((t_rl + t_fl) - (t_rr + t_fr)) * arm
         moment_yaw = ((t_fl + t_rr) - (t_fr + t_rl)) * 0.1
-        # Get V-Tail forces and moments
-        tail_force, tail_moment = self.aero.compute_tail_forces(state.vel, wind_earth, state.att, delta_left, delta_right)
+
+        lift_l = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_left
+        lift_r = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_right
+        moment_pitch_control = (lift_l + lift_r) * 0.5
         
         alpha = state.att[1]
         q_bar = 0.5 * 1.225 * (state.vel[0]**2)
         moment_pitch_stability = q_bar * self.aero.wing_area * 0.4 * (-1.0 * alpha) 
         
-        # Combine V-Tail moments with roll/yaw from motor differential and stability
-        tail_moment = tail_moment + np.array([moment_roll, moment_pitch_stability, moment_yaw])
-        lift, drag, V_T, alpha_calc = self.aero.compute_forces(state.vel, wind_earth, state.att)
+        tail_moment = np.array([moment_roll, moment_pitch_control + moment_pitch_stability, moment_yaw])
+
+        total_thrust = t_fl + t_fr + t_rl + t_rr
+        lift, drag, V_T, alpha_calc = self.aero.compute_forces(state.vel, wind_earth, state.att, total_thrust, tilt_cmd)
+        
         new_state.lift = lift
         new_state.drag = drag
         new_state.V_T = V_T
@@ -50,7 +54,6 @@ class TiltrotorDynamics:
         
         force_body[0] -= drag
         force_body[2] -= lift
-        force_body += tail_force
 
         R_b2w = rotation_body_to_earth(roll, pitch, yaw)
         force_world = R_b2w @ force_body
