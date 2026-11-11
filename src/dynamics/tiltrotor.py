@@ -37,10 +37,24 @@ class TiltrotorDynamics:
         moment_roll = ((t_rl + t_fl) - (t_rr + t_fr)) * arm
         moment_yaw = ((t_fl + t_rr) - (t_fr + t_rl)) * 0.1
 
-        # 4. V-Tail Pitch Moment
+        # 4. Pitch Moments (V-Tail Control + Aircraft Stability)
         lift_l = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_left
         lift_r = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_right
-        moment_pitch = (lift_l + lift_r) * 0.5
+        
+        # V-tail control moment
+        moment_pitch_control = (lift_l + lift_r) * 0.5
+        
+        # Aerodynamic Stability Moment (from Static Margin)
+        # If the drone pitches up (alpha > 0), the wing creates a nose-down moment.
+        alpha = state.att[1] # simplified pitch angle as AoA
+        q_bar = 0.5 * 1.225 * (state.vel[0]**2)
+        S_wing = self.aero.wing_area
+        # Assuming CM_alpha is roughly -1.0 per radian for a stable aircraft
+        moment_pitch_stability = q_bar * S_wing * 0.4 * (-1.0 * alpha) 
+        
+        # Total pitch moment
+        moment_pitch = moment_pitch_control + moment_pitch_stability
+
 
         tail_moment = np.array([moment_roll, moment_pitch, moment_yaw])
 

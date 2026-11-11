@@ -134,10 +134,24 @@ with side_tabs[2]:
 
 with side_tabs[3]:
     wingspan = st.number_input("Wingspan (m)", value=2.0, step=0.1)
-    chord = st.number_input("Chord (m)", value=0.4, step=0.05)
-    wing_area = wingspan * chord * 1.5 
+    
+    c1, c2 = st.columns(2)
+    root_chord = c1.number_input("Root Chord (m)", value=0.4, step=0.05)
+    tip_chord = c2.number_input("Tip Chord (m)", value=0.2, step=0.05)
+    
+    sweep = st.number_input("Sweep Angle (deg)", value=0.0, step=5.0)
+    
+    st.markdown("**V-Tail**")
     vtail_area = st.number_input("V-Tail Area", value=0.1, step=0.01)
     vtail_arm = st.number_input("V-Tail Arm (m)", value=0.5, step=0.05)
+    
+    # Calculate MAC instantly for display
+    taper = tip_chord / root_chord
+    mac_display = (2/3) * root_chord * (1 + taper + taper**2) / (1 + taper)
+    st.info(f"Calculated MAC: **{mac_display:.3f} m**")
+    
+    # Approximate wing area from taper
+    wing_area = wingspan * ((root_chord + tip_chord) / 2.0)
 
 with side_tabs[4]:
     alt_kp = st.number_input("Alt Kp", value=1.5, step=0.1)
@@ -259,9 +273,26 @@ st.pyplot(fig)
 st.markdown("---")
 st.subheader(" Aircraft Geometry & Mass Properties")
 col_geo1, col_geo2 = st.columns(2)
+
+# 1. Instantiate MassProperties
 props = MassProperties(cfg_path)
+
+# 2. Override with the live dashboard variables from the Aero tab
+props.wingspan = wingspan
+props.root_chord = root_chord
+props.tip_chord = tip_chord
+props.sweep_deg = sweep
+
+props.vtail_area = vtail_area
+props.vtail_arm = vtail_arm
+props.mac, props.ac_wing_x = props._calculate_mac_and_ac()
+props.neutral_point_x = props._calculate_neutral_point()
+props.mac, props.ac_wing_x = props._calculate_mac_and_ac()
 props.total_mass = mass + (4 * 0.15)
-props.ac_x = 0.1 + (0.25 * chord)
+props.cg = np.array([0.0, 0.0, 0.0]) 
+
+# 4. Set the mass and CG
+props.total_mass = mass + (4 * 0.15)
 props.cg = np.array([0.0, 0.0, 0.0]) 
 
 with col_geo1:
@@ -269,12 +300,18 @@ with col_geo1:
     ax_side.axhline(0, color='brown', linestyle='--', linewidth=1, alpha=0.5)
     for pos in motor_positions:
         ax_side.plot(pos[0], -pos[2], 'ko', markersize=10)
+    
+    # Plot CG, Wing AC, and Neutral Point
     ax_side.plot(props.cg[0], -props.cg[2], 'bo', markersize=12, label="CG")
-    ax_side.plot(props.ac_x, -props.ac_z, 'go', markersize=12, label="AC")
-    ax_side.plot([props.ac_x - (chord/2), props.ac_x + (chord/2)], [0, 0], 'k-', linewidth=4, label="Wing")
-    ax_side.plot([-0.5, -0.5], [0, -0.2], 'purple', linewidth=4, label="V-Tail")
+    ax_side.plot(props.ac_wing_x, -props.ac_z, 'go', markersize=10, label="Wing AC")
+    ax_side.plot(props.neutral_point_x, -props.ac_z, 'ro', marker='X', markersize=12, label="Neutral Point")
+    
+    # Plot Wing and Tail
+    ax_side.plot([props.le_root_x, props.le_root_x + props.root_chord], [0, 0], 'k-', linewidth=4, label="Wing (Root)")
+    ax_side.plot([-props.cg[0] - props.vtail_arm, -props.cg[0] - props.vtail_arm], [0, -0.2], 'purple', linewidth=4, label="V-Tail")
+    
     ax_side.set_xlim(-1.0, 1.0); ax_side.set_ylim(-0.5, 0.5)
-    ax_side.invert_yaxis(); ax_side.set_title("Side Profile (X-Z)"); ax_side.grid(True, alpha=0.3); ax_side.legend()
+    ax_side.invert_yaxis(); ax_side.set_title("Side Profile: Neutral Point & AC"); ax_side.grid(True, alpha=0.3); ax_side.legend()
     st.pyplot(fig_side)
 
 with col_geo2:
@@ -282,25 +319,39 @@ with col_geo2:
     for pos in motor_positions:
         color = 'tab:blue' if pos[3] else 'gray'
         ax_top.plot(pos[0], pos[1], 'o', color=color, markersize=12)
-    ax_top.plot([props.ac_x, props.ac_x], [-wingspan/2, wingspan/2], 'k-', linewidth=4, label="Wing")
+    ax_top.plot([props.ac_wing_x, props.ac_wing_x], [-wingspan/2, wingspan/2], 'k-', linewidth=4, label="Wing")
     ax_top.plot(props.cg[0], props.cg[1], 'bo', markersize=12, label="CG")
     ax_top.set_xlim(-1.0, 1.0); ax_top.set_ylim(-wingspan, wingspan)
     ax_top.set_title("Top Profile (X-Y)"); ax_top.grid(True, alpha=0.3); ax_top.legend()
     st.pyplot(fig_top)
 
+# Calculate static margin percentage
+sm_pct = props.get_static_margin_pct()
+
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Mass", f"{props.total_mass:.2f} kg")
-c2.metric("Static Margin", f"{props.get_static_margin():.3f} m")
-c3.metric("Stability", "STABLE" if props.get_static_margin() > 0 else "UNSTABLE")
-c4.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m")
+c2.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m²")
+c3.metric("Static Margin", f"{sm_pct:.1f} %")
+
+# Condition logic based on aerospace standards
+if sm_pct < 0.0:
+    c4.error("🔴 UNSTABLE: Pitch divergence")
+    st.error("🚨 **CRITICAL WARNING:** Static Margin is negative. The Aerodynamic Center is *ahead* of the CG. The drone will flip backwards during transition.")
+elif sm_pct > 20.0:
+    c4.warning("🟡 OVER-STABLE: Too sluggish")
+    st.warning("⚠️ **WARNING:** Static Margin > 20%. The aircraft is too stable. It will refuse to pitch and require massive V-tail deflection to transition. This will cause aerodynamic drag and power loss.")
+else:
+    c4.success(f"🟢 STABLE ({sm_pct:.1f}%)")
+    st.success("✅ **SAFE:** Static Margin is within the optimal 0-20% range. Pitch response will be predictable during transition.")
+    
 
 # ==========================================================
-# 3D COORDINATE FRAME & CAD  MODEL VISUALIZATION
+# 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
 # ==========================================================
 import trimesh
 
 st.markdown("---")
-st.subheader("3D Aircraft & Coordinate Systems")
+st.subheader("🗺️ 3D Aircraft & Coordinate Systems")
 st.markdown("The Earth frame is fixed (Red/Green/Blue). The UAM rotates based on the flight telemetry.")
 
 time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
