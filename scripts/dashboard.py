@@ -8,6 +8,8 @@ import yaml
 import sys
 import os
 import plotly.graph_objects as go
+from src.aero.airfoil import generate_naca4
+from src.dynamics.cad_geometry import CadGeometry
 
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +24,15 @@ from src.aero.aerodynamics import AeroModel
 from src.control.trajectory import ReferenceTrajectory
 from src.control.pid import PIDController
 from src.dynamics.mass_properties import MassProperties
-from src.dynamics.frames import rotation_body_to_earth 
+from src.dynamics.frames import rotation_body_to_earth
+
 
 with open(cfg_path, "r") as f:
     cfg = yaml.safe_load(f)
+# Initialize the CAD Geometry engine
+
+geo_path = os.path.join(base_dir, "configs", "geometry_offsets.yaml")
+cad = CadGeometry(geo_path)
 
 class DiscreteGust:
     def __init__(self, start_time, duration, magnitude, direction):
@@ -119,39 +126,55 @@ with side_tabs[1]:
     max_rpm = motor_kv * battery_v * 0.85
     max_omega = max_rpm * 2 * np.pi / 60
     k_thrust = 1e-5 * (prop_dia / 12.0) ** 4
-
 with side_tabs[2]:
+    st.markdown("**Wing Planform (XFLR5 Style)**")
+    c1, c2 = st.columns(2)
+    root_x = c1.number_input("Root LE X (m)", value=0.10, step=0.05, key="geo_root_x")
+    root_y = c2.number_input("Root Y (m)", value=0.0, step=0.05, key="geo_root_y")
+    
+    tip_x = c1.number_input("Tip LE X (m)", value=0.05, step=0.05, key="geo_tip_x")
+    tip_y = c2.number_input("Tip Y (m)", value=1.00, step=0.05, key="geo_tip_y")
+    
+    root_c = c1.number_input("Root Chord (m)", value=0.40, step=0.05, key="geo_root_c")
+    tip_c = c2.number_input("Tip Chord (m)", value=0.20, step=0.05, key="geo_tip_c")
+    
+    sweep = st.number_input("Sweep Angle (deg)", value=0.0, step=5.0, key="geo_sweep")
+    
+    st.markdown("**V-Tail**")
+    vt_root_x = st.number_input("V-Tail Root X (m)", value=-0.6, step=0.05, key="geo_vt_x")
+    vt_tip_y = st.number_input("V-Tail Tip Y (m)", value=0.3, step=0.05, key="geo_vt_y")
+    vt_tip_z = st.number_input("V-Tail Tip Z (m)", value=-0.15, step=0.05, key="geo_vt_z")
+    vtail_area = st.number_input("V-Tail Area", value=0.1, step=0.01, key="geo_vt_area")
+    vtail_arm = st.number_input("V-Tail Arm (m)", value=0.5, step=0.05, key="geo_vt_arm")
+    
+    st.markdown("**Motors**")
     def_motors = cfg.get('motor_positions', [[0.3, 0.4, 0.0, True], [0.3, -0.4, 0.0, True], [-0.3, 0.4, 0.0, False], [-0.3, -0.4, 0.0, False]])
     motor_positions = []
     for i in range(4):
-        st.markdown(f"M{i+1}")
         c1, c2, c3, c4 = st.columns(4)
-        mx = c1.number_input(f"X", value=float(def_motors[i][0]), step=0.05, key=f"mx{i}")
-        my = c2.number_input(f"Y", value=float(def_motors[i][1]), step=0.05, key=f"my{i}")
-        mz = c3.number_input(f"Z", value=float(def_motors[i][2]), step=0.01, key=f"mz{i}")
-        tilts = c4.checkbox(f"Tilt", value=bool(def_motors[i][3]), key=f"tilt{i}")
+        mx = c1.number_input(f"X{i+1}", value=float(def_motors[i][0]), step=0.05, key=f"geo_mx{i}")
+        my = c2.number_input(f"Y{i+1}", value=float(def_motors[i][1]), step=0.05, key=f"geo_my{i}")
+        mz = c3.number_input(f"Z{i+1}", value=float(def_motors[i][2]), step=0.01, key=f"geo_mz{i}")
+        tilts = c4.checkbox(f"Tilt{i+1}", value=bool(def_motors[i][3]), key=f"geo_tilt{i}")
         motor_positions.append([mx, my, mz, tilts])
 
 with side_tabs[3]:
-    wingspan = st.number_input("Wingspan (m)", value=2.0, step=0.1)
+    st.markdown("**Aero Properties**")
+    wing_area = 2.0 * ((root_c + tip_c) / 2.0) * tip_y
+    st.info(f"Calculated Wing Area: {wing_area:.2f} m²")
     
-    c1, c2 = st.columns(2)
-    root_chord = c1.number_input("Root Chord (m)", value=0.4, step=0.05)
-    tip_chord = c2.number_input("Tip Chord (m)", value=0.2, step=0.05)
+    st.markdown("**Calculated Geometry**")
+    # Re-calculate the wing properties for display
+    wing_props = cad.compute_wing_properties(
+        [root_x, root_y, 0.0], 
+        [root_x - root_c, root_y, 0.0], 
+        [tip_x, tip_y, 0.0], 
+        [tip_x - tip_c, tip_y, 0.0]
+    )
     
-    sweep = st.number_input("Sweep Angle (deg)", value=0.0, step=5.0)
+    st.write(f"Mean Aerodynamic Chord (MAC): {wing_props['mac']:.3f} m")
+    st.write(f"Aerodynamic Center (AC) X: {wing_props['ac_x']:.3f} m")
     
-    st.markdown("**V-Tail**")
-    vtail_area = st.number_input("V-Tail Area", value=0.1, step=0.01)
-    vtail_arm = st.number_input("V-Tail Arm (m)", value=0.5, step=0.05)
-    
-    # Calculate MAC instantly for display
-    taper = tip_chord / root_chord
-    mac_display = (2/3) * root_chord * (1 + taper + taper**2) / (1 + taper)
-    st.info(f"Calculated MAC: **{mac_display:.3f} m**")
-    
-    # Approximate wing area from taper
-    wing_area = wingspan * ((root_chord + tip_chord) / 2.0)
 
 with side_tabs[4]:
     alt_kp = st.number_input("Alt Kp", value=1.5, step=0.1)
@@ -213,9 +236,8 @@ def run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail
         cmd = controller.compute(state, r["altitude"], r["speed"], r["tilt"], dt)
         
         wind_vec = gust.get_wind(t)
-        state.vel = state.vel + wind_vec
-        state = dyn.step(state, cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
-        state.vel = state.vel - wind_vec
+        state = dyn.step(state, wind_vec, cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+
         
         if abs(np.rad2deg(state.att[1])) > 60.0:
             break
@@ -278,9 +300,11 @@ col_geo1, col_geo2 = st.columns(2)
 props = MassProperties(cfg_path)
 
 # 2. Override with the live dashboard variables from the Aero tab
-props.wingspan = wingspan
-props.root_chord = root_chord
-props.tip_chord = tip_chord
+# Calculate wingspan from the XFLR5 coordinates
+calculated_wingspan = tip_y * 2.0
+props.wingspan = calculated_wingspan
+props.root_chord = root_c
+props.tip_chord = tip_c
 props.sweep_deg = sweep
 
 props.vtail_area = vtail_area
@@ -290,6 +314,8 @@ props.neutral_point_x = props._calculate_neutral_point()
 props.mac, props.ac_wing_x = props._calculate_mac_and_ac()
 props.total_mass = mass + (4 * 0.15)
 props.cg = np.array([0.0, 0.0, 0.0]) 
+
+
 
 # 4. Set the mass and CG
 props.total_mass = mass + (4 * 0.15)
@@ -319,10 +345,13 @@ with col_geo2:
     for pos in motor_positions:
         color = 'tab:blue' if pos[3] else 'gray'
         ax_top.plot(pos[0], pos[1], 'o', color=color, markersize=12)
-    ax_top.plot([props.ac_wing_x, props.ac_wing_x], [-wingspan/2, wingspan/2], 'k-', linewidth=4, label="Wing")
+    ax_top.plot([props.ac_wing_x, props.ac_wing_x], [-calculated_wingspan/2, calculated_wingspan/2], 'k-', linewidth=4, label="Wing")
     ax_top.plot(props.cg[0], props.cg[1], 'bo', markersize=12, label="CG")
-    ax_top.set_xlim(-1.0, 1.0); ax_top.set_ylim(-wingspan, wingspan)
-    ax_top.set_title("Top Profile (X-Y)"); ax_top.grid(True, alpha=0.3); ax_top.legend()
+    ax_top.set_xlim(-1.0, 1.0)
+    ax_top.set_ylim(-calculated_wingspan, calculated_wingspan)
+    ax_top.set_title("Top Profile (X-Y)")
+    ax_top.grid(True, alpha=0.3)
+    ax_top.legend()
     st.pyplot(fig_top)
 
 # Calculate static margin percentage
@@ -343,7 +372,7 @@ elif sm_pct > 20.0:
 else:
     c4.success(f"🟢 STABLE ({sm_pct:.1f}%)")
     st.success("✅ **SAFE:** Static Margin is within the optimal 0-20% range. Pitch response will be predictable during transition.")
-    
+
 
 # ==========================================================
 # 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
@@ -430,3 +459,94 @@ fig_3d.update_layout(
 )
 
 st.plotly_chart(fig_3d, use_container_width=True)
+# ==========================================================
+# ==========================================================
+# 3D CAD SKELETON WITH CUSTOM AIRFOILS & CONTROL SURFACES
+# ==========================================================
+from src.aero.airfoil import generate_naca4, parse_airfoil_file
+
+st.markdown("---")
+st.subheader("📐 3D CAD Geometry & Control Surfaces")
+
+# --- AIRFOIL SELECTION ---
+st.markdown("### 1. Airfoil Selection")
+c1, c2 = st.columns(2)
+
+with c1:
+    st.markdown("**Main Wing**")
+    wing_af_type = st.selectbox("Type", ["NACA 0012", "Custom Upload"], key="w_type")
+    if wing_af_type == "NACA 0012":
+        w_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+    else:
+        w_file = st.file_uploader("Upload Wing .dat", type=["dat", "txt"], key="w_up")
+        if w_file is not None:
+            w_coords = parse_airfoil_file(w_file.getvalue())
+        else:
+            w_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+
+with c2:
+    st.markdown("**V-Tail**")
+    vt_af_type = st.selectbox("Type", ["NACA 0012", "Custom Upload"], key="vt_type")
+    if vt_af_type == "NACA 0012":
+        vt_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+    else:
+        vt_file = st.file_uploader("Upload V-Tail .dat", type=["dat", "txt"], key="vt_up")
+        if vt_file is not None:
+            vt_coords = parse_airfoil_file(vt_file.getvalue())
+        else:
+            vt_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+
+# --- CONTROL SURFACES ---
+st.markdown("### 2. Control Surface Parameters")
+c3, c4 = st.columns(2)
+with c3:
+    cs_chord = st.slider("Control Surface Chord (% of Wing Chord)", 0.1, 0.5, 0.20, 0.05)
+with c4:
+    cs_span = st.slider("Control Surface Span (% of Wingspan)", 0.1, 1.0, 0.80, 0.05)
+
+tilt_deg = st.slider("Rotor Tilt Angle (deg)", 0.0, 90.0, 0.0, 1.0)
+
+# --- GENERATE MESHES ---
+
+tilted_motors = cad.calculate_tilted_motors(tilt_deg)
+fig_cad = go.Figure()
+
+# Wing Meshes
+for side in ["wing_right", "wing_left"]:
+    main_verts, cs_verts = cad.generate_wing_mesh(side, w_coords, cs_chord, cs_span)
+    
+    # Plot Main Wing (Blue)
+    fig_cad.add_trace(go.Mesh3d(x=main_verts[:,0], y=main_verts[:,1], z=-main_verts[:,2], color='steelblue', opacity=0.9, name="Main Wing"))
+    
+    # Plot Control Surface (Cyan - Aileron/Flap)
+    fig_cad.add_trace(go.Mesh3d(x=cs_verts[:,0], y=cs_verts[:,1], z=-cs_verts[:,2], color='cyan', opacity=1.0, name="Control Surface"))
+
+# V-Tail Meshes
+vt_left, vt_right = cad.generate_vtail_mesh(vt_coords)
+fig_cad.add_trace(go.Mesh3d(x=vt_left[:,0], y=vt_left[:,1], z=-vt_left[:,2], color='darkred', opacity=0.9, name="V-Tail Left"))
+fig_cad.add_trace(go.Mesh3d(x=vt_right[:,0], y=vt_right[:,1], z=-vt_right[:,2], color='darkred', opacity=0.9, name="V-Tail Right"))
+
+# Motors & Thrust
+for m in tilted_motors:
+    color = 'blue' if m["tilts"] else 'orange'
+    pos = m["pos"]
+    t_dir = m["thrust_dir"]
+    fig_cad.add_trace(go.Scatter3d(x=[pos[0]], y=[pos[1]], z=[-pos[2]], mode='markers', marker=dict(size=8, color=color), name=f"M{m['id']}"))
+    
+    arrow_len = 0.3
+    end_x, end_y, end_z = pos[0] + t_dir[0]*arrow_len, pos[1] + t_dir[1]*arrow_len, -(pos[2] + t_dir[2]*arrow_len)
+    fig_cad.add_trace(go.Scatter3d(x=[pos[0], end_x], y=[pos[1], end_y], z=[-pos[2], end_z], mode='lines', line=dict(color=color, width=4, dash='dash'), showlegend=False))
+
+fig_cad.update_layout(
+    scene=dict(
+        xaxis_title='X (Fwd)', yaxis_title='Y (Right)', zaxis_title='Z (Up)',
+        xaxis=dict(range=[-1.0, 1.0], backgroundcolor="rgba(240, 240, 240, 0.5)"),
+        yaxis=dict(range=[-1.5, 1.5], backgroundcolor="rgba(240, 240, 240, 0.5)"),
+        zaxis=dict(range=[-0.5, 0.5], backgroundcolor="rgba(240, 240, 240, 0.5)"),
+        aspectmode='manual', aspectratio=dict(x=1, y=1.5, z=0.5),
+        camera=dict(eye=dict(x=-1.5, y=-1.5, z=1.2)) 
+    ),
+    margin=dict(l=0, r=0, b=0, t=0), height=600
+)
+
+st.plotly_chart(fig_cad, use_container_width=True)

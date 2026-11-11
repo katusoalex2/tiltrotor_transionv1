@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 from src.dynamics.state import AircraftState
 from src.dynamics.rotor import RotorModel
-from src.dynamics.kinematics import rotation_body_to_world, kinematic_euler_rates
+from src.dynamics.frames import rotation_body_to_earth, body_rates_to_euler_rates
 from src.aero.aerodynamics import AeroModel
 
 GRAVITY = 9.81
@@ -15,72 +15,56 @@ class TiltrotorDynamics:
         self.inertia = np.asarray(inertia, dtype=float)
         self.aero = aero
 
-    def step(self, state: AircraftState, omega_fl: float, omega_fr: float, omega_rl: float, omega_rr: float, tilt_cmd: float, delta_left: float, delta_right: float, dt: float) -> AircraftState:
+    def step(self, state: AircraftState, wind_earth: np.ndarray, omega_fl: float, omega_fr: float, omega_rl: float, omega_rr: float, tilt_cmd: float, delta_left: float, delta_right: float, dt: float) -> AircraftState:
         if dt <= 0: raise ValueError('dt must be > 0')
 
         new_state = state.copy()
         roll, pitch, yaw = state.att
 
-        # 1. Individual Motor Thrusts
         t_fl = self.rotor.compute_thrust(omega_fl)
         t_fr = self.rotor.compute_thrust(omega_fr)
         t_rl = self.rotor.compute_thrust(omega_rl)
         t_rr = self.rotor.compute_thrust(omega_rr)
 
-        # 2. Body Frame Forces
         force_x = (t_fl + t_fr) * np.sin(tilt_cmd)
         force_z = -((t_fl + t_fr) * np.cos(tilt_cmd) + t_rl + t_rr)
         force_body = np.array([force_x, 0.0, force_z])
 
-        # 3. Rotational Moments (Differential)
         arm = 0.4
         moment_roll = ((t_rl + t_fl) - (t_rr + t_fr)) * arm
         moment_yaw = ((t_fl + t_rr) - (t_fr + t_rl)) * 0.1
-
-        # 4. Pitch Moments (V-Tail Control + Aircraft Stability)
-        lift_l = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_left
-        lift_r = 0.5 * 1.225 * (state.vel[0]**2) * 0.1 * delta_right
+        # Get V-Tail forces and moments
+        tail_force, tail_moment = self.aero.compute_tail_forces(state.vel, wind_earth, state.att, delta_left, delta_right)
         
-        # V-tail control moment
-        moment_pitch_control = (lift_l + lift_r) * 0.5
-        
-        # Aerodynamic Stability Moment (from Static Margin)
-        # If the drone pitches up (alpha > 0), the wing creates a nose-down moment.
-        alpha = state.att[1] # simplified pitch angle as AoA
+        alpha = state.att[1]
         q_bar = 0.5 * 1.225 * (state.vel[0]**2)
-        S_wing = self.aero.wing_area
-        # Assuming CM_alpha is roughly -1.0 per radian for a stable aircraft
-        moment_pitch_stability = q_bar * S_wing * 0.4 * (-1.0 * alpha) 
+        moment_pitch_stability = q_bar * self.aero.wing_area * 0.4 * (-1.0 * alpha) 
         
-        # Total pitch moment
-        moment_pitch = moment_pitch_control + moment_pitch_stability
-
-
-        tail_moment = np.array([moment_roll, moment_pitch, moment_yaw])
-
-        # 5. Aerodynamics
-        R_b2w = rotation_body_to_world(roll, pitch, yaw)
-        vel_body = R_b2w.T @ state.vel
-        lift, drag = self.aero.compute_wing_forces(vel_body)
+        # Combine V-Tail moments with roll/yaw from motor differential and stability
+        tail_moment = tail_moment + np.array([moment_roll, moment_pitch_stability, moment_yaw])
+        lift, drag, V_T, alpha_calc = self.aero.compute_forces(state.vel, wind_earth, state.att)
         new_state.lift = lift
         new_state.drag = drag
+        new_state.V_T = V_T
+        new_state.alpha = alpha_calc
+        
         force_body[0] -= drag
         force_body[2] -= lift
+        force_body += tail_force
 
-        # 6. Linear Integration
+        R_b2w = rotation_body_to_earth(roll, pitch, yaw)
         force_world = R_b2w @ force_body
         gravity_world = np.array([0.0, 0.0, self.mass * GRAVITY])
         accel_world = (force_world + gravity_world) / self.mass
         new_state.vel = state.vel + accel_world * dt
         new_state.pos = state.pos + new_state.vel * dt
 
-        # 7. Rotational Integration
         p, q, r = state.omega
         Ix, Iy, Iz = self.inertia
         omega_cross_Iomega = np.array([(Iz - Iy)*q*r, (Ix - Iz)*r*p, (Iy - Ix)*p*q])
         angular_accel = (tail_moment - omega_cross_Iomega) / self.inertia
         new_state.omega = state.omega + angular_accel * dt
-        new_state.att = state.att + kinematic_euler_rates(roll, pitch, new_state.omega) * dt
+        new_state.att = state.att + body_rates_to_euler_rates(roll, pitch, new_state.omega) * dt
         new_state.tilt = tilt_cmd
 
         return new_state
