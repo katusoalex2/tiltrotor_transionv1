@@ -121,19 +121,55 @@ st.sidebar.title(" Parameters")
 side_tabs = st.sidebar.tabs(["Body", "Prop", "Geom", "Aero", "PID", "Gust"])
 
 with side_tabs[0]:
-    mass = st.number_input("Mass (kg)", value=float(cfg.get('mass', 5.0)), step=0.1)
-    i_xx = st.number_input("Ixx", value=float(cfg.get('inertia_xx', 0.15)), step=0.01)
-    i_yy = st.number_input("Iyy", value=float(cfg.get('inertia_yy', 0.25)), step=0.01)
-    i_zz = st.number_input("Izz", value=float(cfg.get('inertia_zz', 0.40)), step=0.01)
-
+    st.markdown("**Component Masses (kg)**")
+    mass_fuselage = st.number_input("Fuselage Mass", value=3.0, step=0.1)
+    mass_wing = st.number_input("Wing Mass", value=1.0, step=0.1)
+    mass_vtail = st.number_input("V-Tail Mass", value=0.5, step=0.1)
+    mass_motor = st.number_input("Single Motor Mass", value=0.125, step=0.01)
+    
+    # Calculate total mass automatically
+    mass = mass_fuselage + mass_wing + mass_vtail + (4 * mass_motor)
+    st.info(f"Total Mass: **{mass:.2f} kg**")
+    
 with side_tabs[1]:
-    battery_cells = st.number_input("Battery (S)", value=6, step=1)
-    motor_kv = st.number_input("Motor KV", value=920, step=50)
-    prop_dia = st.number_input("Prop Dia (in)", value=12.0, step=0.5)
-    battery_v = battery_cells * 3.7
-    max_rpm = motor_kv * battery_v * 0.85
+    st.markdown("**Battery**")
+    c1, c2 = st.columns(2)
+    battery_cells = c1.number_input("Cells (S)", value=6, step=1)
+    battery_mah = c2.number_input("Capacity (mAh)", value=5000, step=100)
+    
+    c1, c2 = st.columns(2)
+    battery_c_rating = c1.number_input("C-Rating", value=30, step=5)
+    battery_v_nom = battery_cells * 3.7
+    battery_v_max = battery_cells * 4.2
+    
+    c2.metric("Max Voltage", f"{battery_v_max:.1f} V")
+    st.info(f"Max Discharge Current: **{(battery_mah/1000)*battery_c_rating:.1f} A**")
+    
+    st.markdown("**Motor**")
+    motor_kv = st.number_input("Motor KV (RPM/V)", value=920, step=50)
+    
+    st.markdown("**Propeller**")
+    c1, c2 = st.columns(2)
+    prop_dia = c1.number_input("Diameter (in)", value=12.0, step=0.5)
+    prop_pitch = c2.number_input("Pitch (in)", value=5.5, step=0.5)
+    
+    num_blades = st.number_input("Number of Blades", value=2, step=1, min_value=2, max_value=5)
+    
+    # --- Physics Calculation ---
+    # 1. Max RPM (without load)
+    max_rpm = motor_kv * battery_v_max * 0.85  # 85% efficiency
     max_omega = max_rpm * 2 * np.pi / 60
-    k_thrust = 1e-5 * (prop_dia / 12.0) ** 4
+    
+    # 2. Dynamic Thrust Coefficient (approximate based on prop geometry)
+    # Base k for 12x5.5 2-blade prop
+    base_k = 1e-5
+    dia_factor = (prop_dia / 12.0) ** 4
+    pitch_factor = (prop_pitch / 5.5) ** 0.5
+    blade_factor = (num_blades / 2.0) ** 0.8
+    k_thrust = base_k * dia_factor * pitch_factor * blade_factor
+    
+    st.info(f"Calculated \(k_{{thrust}}\): **{k_thrust:.2e}**")
+
 with side_tabs[2]:
     st.markdown("**Wing Planform (XFLR5 Style)**")
     c1, c2 = st.columns(2)
@@ -208,16 +244,30 @@ with side_tabs[5]:
         gust_dir = st.selectbox("Direction", ["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"])
     else:
         gust_start, gust_duration, gust_mag, gust_dir = 0, 0, 0, "Front"
-
 @st.cache_data
-def run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail_area, vtail_arm,
-                    alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
-                    gust_enabled, random_gust, g_start, g_dur, g_mag, g_dir):
+def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
+                   battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades,
+                   k_thrust, max_omega, wing_area, vtail_area, vtail_arm, 
+                   alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
+                   gust_enabled, random_gust, g_start, g_dur, g_mag, g_dir):
     dt, duration = 0.01, 15.0
+    
     rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
     vtail = VtailModel(area=vtail_area, arm_length=vtail_arm)
-    aero = AeroModel(wing_area=wing_area, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=mass, rotor=rotor, inertia=np.array([i_xx, i_yy, i_zz]), aero=aero)
+    
+    # Pass the physical prop size into the aerodynamics engine for rotor wash
+    prop_diameter_m = prop_dia * 0.0254
+    aero = AeroModel(wing_area=wing_area, vtail=vtail, prop_diameter_m=prop_diameter_m)
+    
+    props = MassProperties(cfg_path)
+    props.mass_fuselage = mass_fuselage
+    props.mass_wing = mass_wing
+    props.mass_vtail = mass_vtail
+    props.mass_motor = mass_motor
+    props.total_mass = mass
+    
+    dyn = TiltrotorDynamics(mass=mass, rotor=rotor, mass_props=props, aero=aero)
+    
     gains = {
         'alt_pid': {'kp': alt_kp, 'ki': alt_ki, 'kd': alt_kd},
         'speed_pid': {'kp': spd_kp, 'ki': spd_ki, 'kd': spd_kd},
@@ -236,7 +286,11 @@ def run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail
 
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, -100.0])
-    log = {"t": [], "alt": [], "ref_alt": [], "pitch": [], "desired_pitch": [], "wind": [], "tilt": [], "roll": [], "yaw": [], "ld_ratio": []}
+    
+    log = {"t": [], "alt": [], "ref_alt": [], "pitch": [], "desired_pitch": [], "wind": [], "tilt": [], "roll": [], "yaw": [], "ld_ratio": [], "current": [], "voltage": []}
+    
+    battery_v_max = battery_cells * 4.2
+    max_current = (battery_mah / 1000) * battery_c_rating
     
     for i in range(int(duration/dt)):
         t = i * dt
@@ -245,11 +299,15 @@ def run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail
         
         wind_vec = gust.get_wind(t)
         state = dyn.step(state, wind_vec, cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
-
         
         if abs(np.rad2deg(state.att[1])) > 60.0:
             break
             
+        # Battery Calculation
+        total_current = cmd["omega_fl"] / motor_kv + cmd["omega_fr"] / motor_kv + cmd["omega_rl"] / motor_kv + cmd["omega_rr"] / motor_kv
+        voltage_sag = 2.0 if total_current > max_current else 0.0
+        current_voltage = battery_v_max - voltage_sag
+        
         log["t"].append(t)
         log["alt"].append(-state.pos[2])
         log["ref_alt"].append(r["altitude"])
@@ -265,15 +323,18 @@ def run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail
         else:
             ld = 0.0
         log["ld_ratio"].append(ld)
+        log["current"].append(total_current)
+        log["voltage"].append(current_voltage)
         
     info = {"start": g_start, "dur": g_dur, "mag": g_mag, "dir": g_dir}
     return {k: np.array(v) for k, v in log.items()}, info
 
 with st.spinner("Running Ultimate simulation..."):
-    data, gust_info = run_simulation(mass, i_xx, i_yy, i_zz, k_thrust, max_omega, wing_area, vtail_area, vtail_arm,
-                          alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
-                          gust_enabled, random_gust, gust_start, gust_duration, gust_mag, gust_dir)
-
+       data, gust_info = run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
+                                 battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades,
+                                 k_thrust, max_omega, wing_area, vtail_area, vtail_arm, 
+                                 alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
+                                 gust_enabled, random_gust, gust_start, gust_duration, gust_mag, gust_dir)
 if gust_enabled:
     st.info(f"**Gust Event:** {gust_info['dir']} at {gust_info['mag']:.1f} m/s, starting at t={gust_info['start']:.1f}s for {gust_info['dur']:.1f}s.")
 
@@ -294,10 +355,25 @@ axes[1, 1].plot(data["t"], data["yaw"], 'purple', linewidth=2); axes[1, 1].axhli
 axes[2, 0].plot(data["t"], data["wind"], 'g-', linewidth=2); axes[2, 0].set_title("Wind Gust"); axes[2, 0].grid(True)
 axes[2, 1].plot(data["t"], data["tilt"], 'm-', linewidth=2); axes[2, 1].set_title("Rotor Tilt"); axes[2, 1].grid(True)
 axes[3, 0].plot(data["t"], data["ld_ratio"], 'teal', linewidth=2); axes[3, 0].set_title("L/D Ratio"); axes[3, 0].grid(True)
-axes[3, 1].axis('off')
+# Replace axes[3, 1].axis('off') with:
+ax_batt = axes[3, 1]
+ax_batt.plot(data["t"], data["current"], 'b-', label="Current (A)")
+ax_batt.axhline(y=(battery_mah/1000)*battery_c_rating, color='r', linestyle='--', label="Max C-Rating")
+ax_batt.set_title("Battery Current Draw")
+ax_batt.set_ylabel("Amps")
+ax_batt.grid(True)
+ax_batt.legend(loc='upper left')
 
 plt.tight_layout()
 st.pyplot(fig)
+
+# Instantiate for the plots
+props_plot = MassProperties(cfg_path)
+props_plot.mass_fuselage = mass_fuselage
+props_plot.mass_wing = mass_wing
+props_plot.mass_vtail = mass_vtail
+props_plot.mass_motor = mass_motor
+props_plot.total_mass = mass
 
 # GEOMETRY
 st.markdown("---")
@@ -322,8 +398,6 @@ props.neutral_point_x = props._calculate_neutral_point()
 props.mac, props.ac_wing_x = props._calculate_mac_and_ac()
 props.total_mass = mass + (4 * 0.15)
 props.cg = np.array([0.0, 0.0, 0.0]) 
-
-
 
 # 4. Set the mass and CG
 props.total_mass = mass + (4 * 0.15)
@@ -381,6 +455,48 @@ else:
     c4.success(f"🟢 STABLE ({sm_pct:.1f}%)")
     st.success("✅ **SAFE:** Static Margin is within the optimal 0-20% range. Pitch response will be predictable during transition.")
 
+st.markdown("---")
+st.subheader("3x3 Inertia Tensor & Mass Properties")
+st.markdown("This matrix describes the aircraft's resistance to rotation. Cross-coupling terms (\(I_{xz}\)) appear when the mass is asymmetric.")
+
+# Calculate the current Inertia Matrix at hover (0 deg tilt)
+current_I = props.calculate_inertia(0.0)
+
+# Convert to a displayable format
+I_display = np.round(current_I, 4)
+
+# Display as columns
+c1, c2, c3 = st.columns(3)
+c1.metric("Ixx (Roll)", f"{I_display[0,0]:.4f} kg·m²")
+c2.metric("Iyy (Pitch)", f"{I_display[1,1]:.4f} kg·m²")
+c3.metric("Izz (Yaw)", f"{I_display[2,2]:.4f} kg·m²")
+
+st.write("Full 3x3 Matrix:")
+st.write(I_display)
+
+# Dynamic Inertia Visualization
+st.markdown("**Dynamic Inertia during Tilt Transition**")
+tilt_scan = np.linspace(0, 90, 20)
+ixx_scan = []
+iyy_scan = []
+izz_scan = []
+
+for t_deg in tilt_scan:
+    I_dyn = props.calculate_inertia(t_deg)
+    ixx_scan.append(I_dyn[0,0])
+    iyy_scan.append(I_dyn[1,1])
+    izz_scan.append(I_dyn[2,2])
+
+fig_I, ax_I = plt.subplots(figsize=(10, 4))
+ax_I.plot(tilt_scan, ixx_scan, label="Ixx (Roll)")
+ax_I.plot(tilt_scan, iyy_scan, label="Iyy (Pitch)")
+ax_I.plot(tilt_scan, izz_scan, label="Izz (Yaw)")
+ax_I.set_xlabel("Rotor Tilt Angle (deg)")
+ax_I.set_ylabel("Inertia (kg·m²)")
+ax_I.set_title("Inertia changes as motors tilt forward")
+ax_I.grid(True)
+ax_I.legend()
+st.pyplot(fig_I)
 
 # ==========================================================
 # 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
