@@ -22,10 +22,33 @@ class TiltrotorDynamics:
         roll, pitch, yaw = state.att
 
         # 1. Motor Thrusts
-        t_fl = self.rotor.compute_thrust(omega_fl)
-        t_fr = self.rotor.compute_thrust(omega_fr)
-        t_rl = self.rotor.compute_thrust(omega_rl)
-        t_rr = self.rotor.compute_thrust(omega_rr)
+                # Compute height above ground (NED: pos[2] is altitude downward, so negative)
+        # The ground is at altitude 0
+        height_above_ground = max(-state.pos[2], 0.01)  # Prevent division by zero
+        
+        t_fl = self.rotor.compute_thrust(omega_fl, height_above_ground)
+        t_fr = self.rotor.compute_thrust(omega_fr, height_above_ground)
+        t_rl = self.rotor.compute_thrust(omega_rl, height_above_ground)
+        t_rr = self.rotor.compute_thrust(omega_rr, height_above_ground)
+        # Calculate angular momentum for all 4 props
+        # Note: Front right and rear left spin CW (-), Front left and rear right spin CCW (+)
+        h_fl = self.rotor.get_angular_momentum(omega_fl)   # CCW (+)
+        h_fr = self.rotor.get_angular_momentum(omega_fr)   # CW (-)
+        h_rl = self.rotor.get_angular_momentum(omega_rl)   # CW (-)
+        h_rr = self.rotor.get_angular_momentum(omega_rr)   # CCW (+)
+        
+        # The total angular momentum vector of the props in the body frame
+        # The front props tilt forward, so their spin axis is tilted by tilt_cmd
+        # The rear props are fixed, so they point straight up (Z-body)
+        h_total = np.array([
+            h_fl * np.sin(tilt_cmd) + h_fr * np.sin(tilt_cmd), # X (Forward) component
+            h_fl - h_fr + h_rl - h_rr,                          # Y (Right) component (spin axis)
+            -h_fl * np.cos(tilt_cmd) - h_fr * np.cos(tilt_cmd) - h_rl - h_rr # Z (Down) component
+        ])
+        
+        # Gyroscopic moment: M_gyro = omega_body x h_total
+        p, q, r = state.omega
+        gyro_moment = np.cross(np.array([p, q, r]), h_total)
         
         # 2. Forces (Body Frame)
         force_x = (t_fl + t_fr) * np.sin(tilt_cmd)
@@ -46,8 +69,8 @@ class TiltrotorDynamics:
         q_bar = 0.5 * 1.225 * (state.vel[0]**2)
         moment_pitch_stability = q_bar * self.aero.wing_area * 0.4 * (-1.0 * alpha_wing) 
         
-        total_moment = np.array([moment_roll, moment_pitch_control + moment_pitch_stability, moment_yaw])
-
+        total_moment = np.array([moment_roll, moment_pitch_control + moment_pitch_stability, moment_yaw]) + gyro_moment
+        
         # 4. Aerodynamic Forces
         total_thrust = t_fl + t_fr + t_rl + t_rr
         lift, drag, V_T, alpha_calc = self.aero.compute_forces(state.vel, wind_earth, state.att, total_thrust, tilt_cmd)

@@ -244,70 +244,85 @@ with side_tabs[5]:
         gust_dir = st.selectbox("Direction", ["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"])
     else:
         gust_start, gust_duration, gust_mag, gust_dir = 0, 0, 0, "Front"
+
+# Map gust settings to the wind variables expected by run_simulation
+wind_enabled = gust_enabled
+wind_speed = gust_mag
+wind_direction = gust_start       # (see note below)
+wind_turbulence = gust_duration   # (see note below)
+surface_roughness = gust_dir      # (see note below)
+
 @st.cache_data
 def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
-                   battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades,
-                   k_thrust, max_omega, wing_area, vtail_area, vtail_arm, 
-                   alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
-                   gust_enabled, random_gust, g_start, g_dur, g_mag, g_dir):
+                   battery_cells, battery_mah, battery_c_rating, motor_kv,
+                   prop_dia, prop_pitch, num_blades, k_thrust, max_omega,
+                   wing_area, vtail_area, vtail_arm,
+                   alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd,
+                   att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
+                   gust_enabled, gust_start, gust_duration, gust_mag, gust_dir):
     dt, duration = 0.01, 15.0
-    
+
     rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
     vtail = VtailModel(area=vtail_area, arm_length=vtail_arm)
-    
-    # Pass the physical prop size into the aerodynamics engine for rotor wash
     prop_diameter_m = prop_dia * 0.0254
     aero = AeroModel(wing_area=wing_area, vtail=vtail, prop_diameter_m=prop_diameter_m)
-    
+
     props = MassProperties(cfg_path)
     props.mass_fuselage = mass_fuselage
     props.mass_wing = mass_wing
     props.mass_vtail = mass_vtail
     props.mass_motor = mass_motor
     props.total_mass = mass
-    
+
     dyn = TiltrotorDynamics(mass=mass, rotor=rotor, mass_props=props, aero=aero)
-    
+
     gains = {
-        'alt_pid': {'kp': alt_kp, 'ki': alt_ki, 'kd': alt_kd},
-        'speed_pid': {'kp': spd_kp, 'ki': spd_ki, 'kd': spd_kd},
-        'att_pid': {'kp': att_kp, 'ki': att_ki, 'kd': att_kd},
-        'rate_pid': {'kp': rate_kp, 'ki': rate_ki, 'kd': rate_kd}
+        'alt_pid':   {'kp': alt_kp,   'ki': alt_ki,   'kd': alt_kd},
+        'speed_pid': {'kp': spd_kp,   'ki': spd_ki,   'kd': spd_kd},
+        'att_pid':   {'kp': att_kp,   'ki': att_ki,   'kd': att_kd},
+        'rate_pid':  {'kp': rate_kp,  'ki': rate_ki,  'kd': rate_kd},
     }
     controller = FullCascadePID(mass, k_thrust, gains)
     ref = ReferenceTrajectory("configs/robust_corridor.csv", speed_max=12.0)
-    
-    if random_gust:
-        g_start = np.random.uniform(2.0, 12.0)
-        g_dur = np.random.uniform(1.0, 4.0)
-        g_mag = np.random.uniform(2.0, 10.0)
-        g_dir = np.random.choice(["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"])
-    gust = DiscreteGust(g_start, g_dur, g_mag, g_dir) if gust_enabled else DiscreteGust(0, 0.01, 0.0, "Front")
+
+    # Build gust model
+    gust = DiscreteGust(gust_start, gust_duration, gust_mag, gust_dir) if gust_enabled else None
 
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, -100.0])
-    
-    log = {"t": [], "alt": [], "ref_alt": [], "pitch": [], "desired_pitch": [], "wind": [], "tilt": [], "roll": [], "yaw": [], "ld_ratio": [], "current": [], "voltage": []}
-    
-    battery_v_max = battery_cells * 4.2
-    max_current = (battery_mah / 1000) * battery_c_rating
-    
-    for i in range(int(duration/dt)):
+
+    log = {"t": [], "alt": [], "ref_alt": [], "pitch": [], "desired_pitch": [],
+           "wind": [], "tilt": [], "roll": [], "yaw": [], "ld_ratio": [],
+           "current": [], "voltage": [], "ground_effect": [],
+           "u_body": [], "w_body": [], "V_T": []}
+
+    from src.dynamics.frames import rotation_earth_to_body
+
+    for i in range(int(duration / dt)):
         t = i * dt
         r = ref.at(t)
         cmd = controller.compute(state, r["altitude"], r["speed"], r["tilt"], dt)
-        
-        wind_vec = gust.get_wind(t)
-        state = dyn.step(state, wind_vec, cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
-        
+
+        wind_vec = gust.get_wind(t) if gust is not None else np.array([0.0, 0.0, 0.0])
+
+        state = dyn.step(state, wind_vec,
+                         cmd["omega_fl"], cmd["omega_fr"],
+                         cmd["omega_rl"], cmd["omega_rr"],
+                         r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+
         if abs(np.rad2deg(state.att[1])) > 60.0:
             break
-            
-        # Battery Calculation
-        total_current = cmd["omega_fl"] / motor_kv + cmd["omega_fr"] / motor_kv + cmd["omega_rl"] / motor_kv + cmd["omega_rr"] / motor_kv
-        voltage_sag = 2.0 if total_current > max_current else 0.0
-        current_voltage = battery_v_max - voltage_sag
-        
+
+        height_above_ground = max(-state.pos[2], 0.01)
+        ge_ratio = rotor.get_ground_effect_ratio(height_above_ground)
+
+        vel_air_earth = state.vel - wind_vec
+        R_e2b = rotation_earth_to_body(state.att[0], state.att[1], state.att[2])
+        vel_body = R_e2b @ vel_air_earth
+        log["u_body"].append(vel_body[0])
+        log["w_body"].append(vel_body[2])
+        log["V_T"].append(np.sqrt(vel_body[0]**2 + vel_body[2]**2))
+
         log["t"].append(t)
         log["alt"].append(-state.pos[2])
         log["ref_alt"].append(r["altitude"])
@@ -317,26 +332,37 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
         log["tilt"].append(np.rad2deg(r["tilt"]))
         log["roll"].append(np.rad2deg(state.att[0]))
         log["yaw"].append(np.rad2deg(state.att[2]))
-        
+
         if state.vel[0] > 2.0 and state.drag > 0.1:
             ld = state.lift / state.drag
         else:
             ld = 0.0
         log["ld_ratio"].append(ld)
+
+        total_current = (cmd["omega_fl"] + cmd["omega_fr"] + cmd["omega_rl"] + cmd["omega_rr"]) / motor_kv
+        max_current = (battery_mah / 1000) * battery_c_rating
+        voltage_sag = 2.0 if total_current > max_current else 0.0
         log["current"].append(total_current)
-        log["voltage"].append(current_voltage)
-        
-    info = {"start": g_start, "dur": g_dur, "mag": g_mag, "dir": g_dir}
+        log["voltage"].append(battery_cells * 4.2 - voltage_sag)
+        log["ground_effect"].append(ge_ratio)
+
+    info = {"start": gust_start, "dur": gust_duration,
+            "mag": gust_mag if gust_enabled else 0, "dir": gust_dir}
     return {k: np.array(v) for k, v in log.items()}, info
 
-with st.spinner("Running Ultimate simulation..."):
-       data, gust_info = run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
-                                 battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades,
-                                 k_thrust, max_omega, wing_area, vtail_area, vtail_arm, 
-                                 alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
-                                 gust_enabled, random_gust, gust_start, gust_duration, gust_mag, gust_dir)
-if gust_enabled:
-    st.info(f"**Gust Event:** {gust_info['dir']} at {gust_info['mag']:.1f} m/s, starting at t={gust_info['start']:.1f}s for {gust_info['dur']:.1f}s.")
+with st.spinner("Running simulation..."):
+    data, gust_info = run_simulation(
+        mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
+        battery_cells, battery_mah, battery_c_rating, motor_kv,
+        prop_dia, prop_pitch, num_blades, k_thrust, max_omega,
+        wing_area, vtail_area, vtail_arm,
+        alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd,
+        att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
+        gust_enabled, gust_start, gust_duration, gust_mag, gust_dir
+    )
+
+if wind_enabled:
+    st.info(f"**Wind Event:** {gust_info['dir']} at {gust_info['mag']:.1f} m/s, starting at t={gust_info['start']:.1f}s for {gust_info['dur']:.1f}s.")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Max Alt Loss", f"{100 - data['alt'].min():.2f} m")
@@ -374,6 +400,61 @@ props_plot.mass_wing = mass_wing
 props_plot.mass_vtail = mass_vtail
 props_plot.mass_motor = mass_motor
 props_plot.total_mass = mass
+
+# ==========================================================
+# WIND TRIANGLE VISUALIZATION
+# ==========================================================
+st.markdown("---")
+st.subheader("🌬️ Wind Triangle (Live)")
+
+c1, c2 = st.columns(2)
+
+with c1:
+    # Wind Triangle vector plot
+    fig_wt, ax_wt = plt.subplots(figsize=(8, 6))
+    
+    # Get the most recent values
+    u_airspeed = data["u_body"][-1]
+    w_airspeed = data["w_body"][-1]
+    
+    # Draw the airspeed vector in body frame
+    ax_wt.arrow(0, 0, u_airspeed, -w_airspeed, 
+                head_width=0.3, head_length=0.5, fc='blue', ec='blue', 
+                linewidth=3, label=f"True Airspeed V_T = {data['V_T'][-1]:.2f} m/s")
+    
+    ax_wt.axhline(0, color='k', linestyle='--', alpha=0.3)
+    ax_wt.axvline(0, color='k', linestyle='--', alpha=0.3)
+    ax_wt.set_xlabel("Forward velocity u (m/s)")
+    ax_wt.set_ylabel("Downward velocity w (m/s)")
+    ax_wt.set_title(f"Airspeed Vector in Body Frame\n(α = {np.rad2deg(np.arctan2(w_airspeed, u_airspeed)):.1f}°)")
+    ax_wt.grid(True)
+    ax_wt.legend()
+    ax_wt.set_aspect('equal', adjustable='datalim')
+    st.pyplot(fig_wt)
+
+with c2:
+    # Angle of Attack (alpha) over time
+    alpha_history = np.rad2deg(np.arctan2(np.array(data["w_body"]), np.array(data["u_body"])))
+    
+    fig_alpha, ax_alpha = plt.subplots(figsize=(8, 6))
+    ax_alpha.plot(data["t"], alpha_history, 'b-', linewidth=2)
+    ax_alpha.axhline(15, color='r', linestyle='--', alpha=0.5, label="Stall angle (15°)")
+    ax_alpha.axhline(-15, color='r', linestyle='--', alpha=0.5)
+    ax_alpha.set_xlabel("Time (s)")
+    ax_alpha.set_ylabel("Angle of Attack α (deg)")
+    ax_alpha.set_title("Angle of Attack during Flight")
+    ax_alpha.grid(True)
+    ax_alpha.legend()
+    st.pyplot(fig_alpha)
+
+# Show the instantaneous values
+st.markdown("**Instantaneous Wind Triangle**")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("True Airspeed", f"{data['V_T'][-1]:.2f} m/s")
+c2.metric("u (Forward Airspeed)", f"{data['u_body'][-1]:.2f} m/s")
+c3.metric("w (Downward Airspeed)", f"{data['w_body'][-1]:.2f} m/s")
+alpha_now = np.rad2deg(np.arctan2(data['w_body'][-1], data['u_body'][-1])) if data['u_body'][-1] != 0 else 0
+c4.metric("Angle of Attack α", f"{alpha_now:.1f}°")
 
 # GEOMETRY
 st.markdown("---")
