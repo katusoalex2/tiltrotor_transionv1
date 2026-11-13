@@ -22,13 +22,19 @@ if base_dir not in sys.path:
 # ==========================================================
 from src.aero.airfoil import generate_naca4
 from src.dynamics.cad_geometry import CadGeometry
+from src.allocation.allocator import ControlAllocator
 from src.dynamics.state import AircraftState
 from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
+from src.dynamics.transition import (
+    control_effectiveness_map,
+    solve_longitudinal_trim,
+    transition_speed_envelope,
+)
 from src.aero.vtail import VtailModel
 from src.aero.aerodynamics import AeroModel
 from src.control.trajectory import ReferenceTrajectory
-from src.control.pid import PIDController
+from src.control.architecture import ControlLawArchitecture
 from src.dynamics.mass_properties import MassProperties
 from src.dynamics.frames import rotation_body_to_earth
 from src.control.mission import MissionManager, MissionProfile, Waypoint
@@ -69,53 +75,6 @@ class DiscreteGust:
             m = current_mag / np.sqrt(3)
             return np.array([m, m, -m])
         return np.array([0.0, 0.0, 0.0])
-
-class FullCascadePID:
-    def __init__(self, mass, k_thrust, gains):
-        self.mass = mass
-        self.k_thrust = k_thrust
-        self.alt_pid = PIDController(kp=gains['alt_pid']['kp'], ki=gains['alt_pid']['ki'], kd=gains['alt_pid']['kd'], limit=500.0)
-        self.speed_pid = PIDController(kp=gains['speed_pid']['kp'], ki=gains['speed_pid']['ki'], kd=gains['speed_pid']['kd'], limit=0.35)
-        self.att_pid = PIDController(kp=gains['att_pid']['kp'], ki=gains['att_pid']['ki'], kd=gains['att_pid']['kd'], limit=2.0)
-        self.rate_pid = PIDController(kp=gains['rate_pid']['kp'], ki=gains['rate_pid']['ki'], kd=gains['rate_pid']['kd'], limit=0.2)
-        self.roll_pid = PIDController(kp=1.0, ki=0.1, kd=0.2, limit=1.0)
-        self.yaw_pid = PIDController(kp=1.0, ki=0.1, kd=0.2, limit=1.0)
-
-    def compute(self, state, ref_alt, ref_speed, ref_tilt, dt):
-        current_alt = -state.pos[2]
-        current_speed = state.vel[0]
-        current_pitch = state.att[1]
-        current_pitch_rate = state.omega[1]
-        current_roll = state.att[0]
-        current_yaw = state.att[2]
-        
-        alt_error = ref_alt - current_alt
-        thrust_correction = self.alt_pid.compute(0, -alt_error, dt)
-        base_thrust = (self.mass * 9.81) + thrust_correction
-        omega_base = np.sqrt(max(base_thrust, 0.0) / (4 * self.k_thrust))
-        
-        roll_cmd = self.roll_pid.compute(0, -current_roll, dt)
-        yaw_cmd = self.yaw_pid.compute(0, -current_yaw, dt)
-        
-        omega_fl = np.clip(omega_base + roll_cmd + yaw_cmd, 0, 3000)
-        omega_fr = np.clip(omega_base - roll_cmd - yaw_cmd, 0, 3000)
-        omega_rl = np.clip(omega_base + roll_cmd - yaw_cmd, 0, 3000)
-        omega_rr = np.clip(omega_base - roll_cmd + yaw_cmd, 0, 3000)
-
-        speed_error = ref_speed - current_speed
-        pitch_from_speed = -self.speed_pid.compute(0, -speed_error, dt)
-        pitch_from_alt = alt_error * 0.05 
-        desired_pitch = np.clip(pitch_from_alt + pitch_from_speed, -0.26, 0.26)
-        
-        pitch_error = desired_pitch - current_pitch
-        desired_pitch_rate = self.att_pid.compute(0, -pitch_error, dt)
-        
-        rate_error = desired_pitch_rate - current_pitch_rate
-        vtail_cmd = -self.rate_pid.compute(0, -rate_error, dt)
-        
-        return {"omega_fl": omega_fl, "omega_fr": omega_fr, "omega_rl": omega_rl, "omega_rr": omega_rr, 
-                "tilt": ref_tilt, "delta_left": vtail_cmd, "delta_right": vtail_cmd, 
-                "desired_pitch": desired_pitch}
 
 st.set_page_config(page_title="Tilt-rotor systems dashboard", layout="wide")
 st.title("Tilt-rotor systems dashboard")
@@ -246,6 +205,12 @@ with side_tabs[4]:
     rate_kp = st.number_input("Rate Kp", value=0.5, step=0.05)
     rate_ki = st.number_input("Rate Ki", value=0.0, step=0.01)
     rate_kd = st.number_input("Rate Kd", value=0.01, step=0.01)
+    hover_rate_scale = st.slider(
+        "Hover rate-gain scale", 0.5, 2.5, 1.5, 0.05, key="hover_rate_scale"
+    )
+    cruise_rate_scale = st.slider(
+        "Cruise rate-gain scale", 0.25, 1.5, 0.75, 0.05, key="cruise_rate_scale"
+    )
 
 with side_tabs[5]:
     gust_enabled = st.checkbox("Enable Wind Gust", value=True)
@@ -326,7 +291,7 @@ wind_turbulence = gust_duration   # (see note below)
 surface_roughness = gust_dir      # (see note below)
 
 @st.cache_data
-def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows):
+def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, hover_rate_scale, cruise_rate_scale, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows):
     dt, duration = 0.01, 63.0
     
     rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
@@ -351,13 +316,20 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     
     dyn = TiltrotorDynamics(mass=mass, rotor=rotor, mass_props=props, aero=aero)
     
-    gains = {
-        'alt_pid': {'kp': alt_kp, 'ki': alt_ki, 'kd': alt_kd},
-        'speed_pid': {'kp': spd_kp, 'ki': spd_ki, 'kd': spd_kd},
-        'att_pid': {'kp': att_kp, 'ki': att_ki, 'kd': att_kd},
-        'rate_pid': {'kp': rate_kp, 'ki': rate_ki, 'kd': rate_kd}
-    }
-    controller = FullCascadePID(mass, k_thrust, gains)
+    controller = ControlLawArchitecture(
+        mass=mass,
+        k_thrust=k_thrust,
+        max_omega=max_omega,
+        motor_positions=motor_positions,
+        vtail_model=vtail,
+        aero_model=aero,
+        altitude_gains={"kp": alt_kp, "ki": alt_ki, "kd": alt_kd},
+        speed_gains={"kp": spd_kp, "ki": spd_ki, "kd": spd_kd},
+        attitude_gains={"kp": att_kp, "ki": att_ki, "kd": att_kd},
+        rate_gains={"kp": rate_kp, "ki": rate_ki, "kd": rate_kd},
+        hover_rate_scale=hover_rate_scale,
+        cruise_rate_scale=cruise_rate_scale,
+    )
     ref = MissionProfile()
     waypoints = [
         Waypoint(
@@ -406,6 +378,16 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         "accel_north": [], "accel_east": [], "accel_down": [],
         "angular_accel_p": [], "angular_accel_q": [], "angular_accel_r": [],
         "mission_index": [], "phase": [],
+        "desired_roll": [], "desired_heading": [],
+        "desired_p": [], "desired_q": [], "desired_r": [],
+        "moment_l_command": [], "moment_m_command": [], "moment_n_command": [],
+        "allocation_residual": [], "allocation_saturated": [],
+        "tilt_controller_cmd": [], "tilt_limited": [],
+        "gain_blend": [], "gain_kp": [], "gain_ki": [], "gain_kd": [],
+        "airspeed_mps": [], "guidance_altitude_error": [], "guidance_speed_error": [],
+        "guidance_north_error": [], "guidance_east_error": [],
+        "guidance_heading_error": [], "guidance_path_distance": [],
+        "requested_thrust": [], "vertical_acceleration_command": [], "requested_tilt": [],
     }
     
     from src.dynamics.frames import rotation_earth_to_body
@@ -433,13 +415,22 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         else:
             r = ref.at(t)
 
-        cmd = controller.compute(state, r["altitude"], r["speed"], r["tilt"], dt)
-        
-        current_alt = -state.pos[2]
         wind_vec = gust.get_wind(t) if gust is not None else np.array([0.0, 0.0, 0.0])
         tilt_error = r["tilt"] - state.tilt
         tilt_step = np.deg2rad(max_tilt_rate_deg_s) * dt
         actual_tilt = state.tilt + np.clip(tilt_error, -tilt_step, tilt_step)
+        cmd = controller.compute(
+            state,
+            r,
+            dt,
+            wind_vec,
+            actuator_tilt_rad=actual_tilt,
+        )
+        actual_tilt = state.tilt + np.clip(
+            cmd["tilt"] - state.tilt,
+            -tilt_step,
+            tilt_step,
+        )
         state = dyn.step(state, wind_vec, cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"], actual_tilt, cmd["delta_left"], cmd["delta_right"], dt)
         
         if abs(np.rad2deg(state.att[1])) > 60.0:
@@ -490,6 +481,8 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["wind"].append(np.linalg.norm(wind_vec))
         log["tilt"].append(np.rad2deg(state.tilt))
         log["tilt_cmd"].append(np.rad2deg(r["tilt"]))
+        log["tilt_controller_cmd"].append(np.rad2deg(cmd["tilt"]))
+        log["tilt_limited"].append(cmd["tilt_limited"])
         log["roll"].append(np.rad2deg(state.att[0]))
         log["yaw"].append(np.rad2deg(state.att[2]))
         for motor_name in ("omega_fl", "omega_fr", "omega_rl", "omega_rr"):
@@ -519,6 +512,35 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["angular_accel_r"].append(dyn.last_diagnostics["angular_acceleration_body"][2])
         log["mission_index"].append(mission_manager.sequencer.index)
         log["phase"].append(r["phase"])
+        for key in (
+            "desired_roll",
+            "desired_heading",
+            "desired_p",
+            "desired_q",
+            "desired_r",
+            "moment_l_command",
+            "moment_m_command",
+            "moment_n_command",
+            "gain_blend",
+            "gain_kp",
+            "gain_ki",
+            "gain_kd",
+            "airspeed_mps",
+            "guidance_altitude_error",
+            "guidance_speed_error",
+            "guidance_north_error",
+            "guidance_east_error",
+            "guidance_heading_error",
+            "guidance_path_distance",
+            "requested_thrust",
+            "vertical_acceleration_command",
+            "requested_tilt",
+        ):
+            log[key].append(cmd[key])
+        log["allocation_residual"].append(
+            float(np.max(np.abs(cmd["allocation_residual_normalized"])))
+        )
+        log["allocation_saturated"].append(cmd["allocation_saturated"])
         
         if state.vel[0] > 2.0 and state.drag > 0.1:
             ld = state.lift / state.drag
@@ -544,6 +566,11 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         "mission_complete": mission_manager.sequencer.complete,
         "termination_reason": termination_reason,
         "elapsed_time": float(log["t"][-1]) if log["t"] else 0.0,
+        "allocation_matrix": controller.last_allocation_matrix.copy(),
+        "allocation_residual": controller.last_allocation_residual.copy(),
+        "allocation_saturation_fraction": float(np.mean(log["allocation_saturated"]))
+        if log["allocation_saturated"] else 0.0,
+        "tilt_limited_steps": int(np.count_nonzero(log["tilt_limited"])),
     }
     return {k: np.array(v) for k, v in log.items()}, info
 
@@ -556,6 +583,7 @@ with st.spinner("Running simulation..."):
         sweep, tuple(tuple(position) for position in motor_positions),
         alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd,
         att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
+        hover_rate_scale, cruise_rate_scale,
         gust_enabled, gust_start, gust_duration, gust_mag, gust_dir,
         max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude,
         manual_speed, manual_tilt_deg, waypoint_rows
@@ -1079,7 +1107,8 @@ with c2:
     st.pyplot(fig_ratio, alt="Lift handoff ratio from rotor-dominated to wing-dominated support")
 
 # Control authority at current instant
-st.markdown("### Control Authority at Current Instant")
+st.markdown("### Simplified Control Authority Estimate")
+st.caption("This pitch-authority blend is a heuristic; the model-based control-effectiveness map is in Phase 5 below.")
 current_tilt = data["tilt"][-1]
 current_V_T = data["V_T"][-1]
 if current_V_T < 0.5:
@@ -1095,7 +1124,8 @@ c2.metric("V-Tail Pitch Authority", f"{auth['vtail_authority_frac']*100:.0f}%")
 c3.metric("Controller Blend", f"{blend*100:.0f}% (0=rotor, 100=wing)")
 
 # Control authority vs tilt angle (the "handoff map")
-st.markdown("### Control Authority Map")
+st.markdown("### Heuristic Pitch Authority Trend")
+st.caption("Illustrative tilt trend evaluated at a fixed 12 m/s; it is not the finite-difference actuator map.")
 tilt_scan = np.linspace(0, 90, 50)
 rotor_fracs = []
 vtail_fracs = []
@@ -1182,6 +1212,425 @@ ax_I.set_title("Inertia changes as motors tilt forward")
 ax_I.grid(True)
 ax_I.legend()
 st.pyplot(fig_I, alt="Roll, pitch, and yaw inertia values as nacelles tilt")
+
+# ==========================================================
+# PHASE 5: TRANSITION DYNAMICS
+# ==========================================================
+st.markdown("---")
+st.subheader("Phase 5: Transition dynamics — the bridge")
+st.caption(
+    "Analyze the tilt/speed corridor, actuator moment effectiveness, and longitudinal trim "
+    "using the configured mass, motor, wing, V-tail, and rotor layout."
+)
+
+analysis_rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
+analysis_vtail = VtailModel(area=vtail_area, arm_length=vtail_arm)
+analysis_aero = AeroModel(
+    wing_area=wing_area,
+    vtail=analysis_vtail,
+    prop_diameter_m=prop_dia * 0.0254,
+)
+analysis_dynamics = TiltrotorDynamics(
+    mass=mass,
+    rotor=analysis_rotor,
+    mass_props=props,
+    aero=analysis_aero,
+)
+
+analysis_speed_col, analysis_tilt_col = st.columns(2)
+analysis_speed = analysis_speed_col.slider(
+    "Analysis true airspeed (m/s)",
+    min_value=0.0,
+    max_value=30.0,
+    value=float(np.clip(max(data["V_T"][-1], 8.0), 0.0, 30.0)),
+    step=0.5,
+    key="transition_analysis_speed",
+)
+analysis_tilt_deg = analysis_tilt_col.slider(
+    "Analysis nacelle tilt (deg)",
+    min_value=0,
+    max_value=90,
+    value=45,
+    step=1,
+    key="transition_analysis_tilt",
+)
+analysis_tilt_rad = np.deg2rad(analysis_tilt_deg)
+tail_limit_rad = 0.2
+trim = solve_longitudinal_trim(
+    analysis_dynamics,
+    airspeed_mps=analysis_speed,
+    tilt_rad=analysis_tilt_rad,
+    tail_limit_rad=tail_limit_rad,
+)
+
+corridor_tab, effectiveness_tab, trim_tab = st.tabs(
+    ["5.1 Transition corridor", "5.2 Control effectiveness", "5.3 Trim analysis"]
+)
+
+with corridor_tab:
+    max_rotor_thrust = analysis_rotor.compute_thrust(max_omega, height_above_ground=100.0)
+    cl_max = analysis_aero.CL_0 + analysis_aero.CL_alpha * analysis_aero.stall_angle
+    envelope = transition_speed_envelope(
+        mass=mass,
+        wing_area=wing_area,
+        max_thrust_per_rotor=max_rotor_thrust,
+        rotor_tilts=[bool(position[3]) for position in motor_positions],
+        rho=analysis_aero.rho,
+        cl_max=cl_max,
+        cd_0=analysis_aero.CD_0,
+        aspect_ratio=analysis_aero.AR,
+    )
+    feasible = envelope["feasible"]
+    fig_corridor = go.Figure()
+    if np.any(feasible):
+        corridor_tilt = envelope["tilt_deg"][feasible]
+        minimum_speed = envelope["minimum_speed_mps"][feasible]
+        maximum_speed = envelope["maximum_speed_mps"][feasible]
+        fig_corridor.add_trace(go.Scatter(
+            x=np.concatenate([corridor_tilt, corridor_tilt[::-1]]),
+            y=np.concatenate([maximum_speed, minimum_speed[::-1]]),
+            fill="toself",
+            fillcolor="rgba(52, 152, 219, 0.18)",
+            line=dict(color="rgba(52, 152, 219, 0.25)"),
+            name="Quasi-steady feasible envelope",
+            hoverinfo="skip",
+        ))
+        fig_corridor.add_trace(go.Scatter(
+            x=corridor_tilt,
+            y=minimum_speed,
+            mode="lines",
+            line=dict(color="royalblue", dash="dash"),
+            name="Minimum speed",
+        ))
+        fig_corridor.add_trace(go.Scatter(
+            x=corridor_tilt,
+            y=maximum_speed,
+            mode="lines",
+            line=dict(color="royalblue"),
+            name="Maximum speed",
+        ))
+    fig_corridor.add_trace(go.Scatter(
+        x=data["tilt"],
+        y=data["V_T"],
+        mode="lines+markers",
+        marker=dict(size=4),
+        line=dict(color="darkorange", width=2),
+        name="Simulated transition",
+    ))
+    fig_corridor.update_layout(
+        xaxis_title="Nacelle tilt (deg)",
+        yaxis_title="True airspeed (m/s)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=440,
+    )
+    st.plotly_chart(
+        fig_corridor,
+        width="stretch",
+        alt="Tilt versus airspeed transition corridor with minimum and maximum quasi-steady speed bounds and the simulated flight path",
+    )
+    st.caption(
+        "Bounds use maximum rotor thrust, wing CLmax/stall speed, and the aircraft drag polar. "
+        "They exclude gusts, actuator rate, electrical limits, and pitch-moment constraints; "
+        "treat this as a design estimate, not a certified safe corridor."
+    )
+    if not np.any(feasible):
+        st.warning("No quasi-steady corridor is feasible with the current mass, wing, and propulsion settings.")
+
+with effectiveness_tab:
+    effectiveness_reference = "trim solution" if trim["feasible"] else "best-fit point"
+    rotor_labels, moment_effectiveness = control_effectiveness_map(
+        analysis_dynamics,
+        airspeed_mps=analysis_speed,
+        tilt_rad=analysis_tilt_rad,
+        alpha_rad=np.deg2rad(float(trim["alpha_deg"])),
+        collective_omega=float(trim["motor_rpm"]) * 2.0 * np.pi / 60.0,
+        tail_deflection_rad=np.deg2rad(float(trim["tail_deflection_deg"])),
+        tail_limit_rad=tail_limit_rad,
+    )
+    fig_effectiveness = go.Figure(go.Heatmap(
+        z=moment_effectiveness,
+        x=rotor_labels,
+        y=["Roll L", "Pitch M", "Yaw N"],
+        colorscale="RdBu",
+        zmid=0.0,
+        colorbar=dict(title="Moment change (N·m)"),
+        hovertemplate="%{y}<br>%{x}<br>%{z:.4f} N·m<extra></extra>",
+    ))
+    fig_effectiveness.update_xaxes(
+        tickmode="array",
+        tickvals=rotor_labels,
+        ticktext=rotor_labels,
+        tickangle=-30,
+        automargin=True,
+    )
+    fig_effectiveness.update_layout(
+        xaxis_title="Standardized actuator perturbation",
+        yaxis_title="Body moment axis",
+        margin=dict(l=20, r=20, t=30, b=130),
+        height=440,
+    )
+    st.plotly_chart(
+        fig_effectiveness,
+        width="stretch",
+        alt="Finite-difference mapping from differential motor RPM and V-tail deflections to roll, pitch, and yaw moments",
+    )
+    st.caption(
+        f"Local moment changes are evaluated around the {effectiveness_reference} "
+        f"({analysis_speed:.1f} m/s, {analysis_tilt_deg}°). Each rotor channel applies "
+        "a ±50 RPM differential pattern; each V-tail channel applies a ±5° perturbation. "
+        "Perturbations are clipped at actuator bounds."
+    )
+
+with trim_tab:
+    trim_columns = st.columns(4)
+    trim_columns[0].metric("Longitudinal trim", "Feasible" if trim["feasible"] else "Not feasible")
+    trim_columns[1].metric("Angle of attack", f"{float(trim['alpha_deg']):.2f}°")
+    trim_columns[2].metric("Collective motor speed", f"{float(trim['motor_rpm']):.0f} RPM")
+    trim_columns[3].metric("Symmetric V-tail", f"{float(trim['tail_deflection_deg']):.2f}°")
+    trim_acceleration = np.asarray(trim["acceleration_ned"], dtype=float)
+    trim_moment = np.asarray(trim["moment_body"], dtype=float)
+    st.caption(
+        f"Steady, level, zero-wind trim at {analysis_speed:.1f} m/s and {analysis_tilt_deg}° tilt; "
+        f"bounds: α ±{np.rad2deg(analysis_aero.stall_angle):.1f}°, "
+        f"motor 0–{max_rpm:.0f} RPM, V-tail ±{np.rad2deg(tail_limit_rad):.1f}°. "
+        f"Residuals: aN={trim_acceleration[0]:.3f} m/s², "
+        f"aD={trim_acceleration[2]:.3f} m/s², "
+        f"My={trim_moment[1]:.3f} N·m, "
+        f"max normalized residual={float(trim['max_normalized_residual']):.4f}."
+    )
+    if trim["feasible"]:
+        st.success("Force and pitch-moment residuals are within the configured trim tolerance.")
+    else:
+        st.warning(
+            "No feasible trim was found within the angle-of-attack, motor, and V-tail limits. "
+            f"Optimizer: {trim['solver_message']}"
+        )
+
+# ==========================================================
+# PHASE 6: CONTROL LAW ARCHITECTURE
+# ==========================================================
+st.markdown("---")
+st.subheader("Phase 6: Control law architecture — the brain")
+st.caption(
+    "The simulation now runs guidance → attitude → body-rate control → scheduled gains → "
+    "bounded actuator allocation. This is a simulation architecture, not flight-certified control software."
+)
+allocation_tab, rate_tab, attitude_tab, guidance_tab, schedule_tab = st.tabs([
+    "6.1 Control allocation",
+    "6.2 Inner loop: rate control",
+    "6.3 Outer loop: attitude control",
+    "6.4 Guidance: path following",
+    "6.5 Gain scheduling",
+])
+
+with allocation_tab:
+    allocation_metrics = st.columns(3)
+    allocation_metrics[0].metric(
+        "Time steps with allocation saturation",
+        f"{100.0 * gust_info['allocation_saturation_fraction']:.1f}%",
+    )
+    allocation_metrics[1].metric(
+        "Final normalized allocation residual",
+        f"{float(data['allocation_residual'][-1]):.3f}",
+    )
+    allocation_metrics[2].metric(
+        "Time steps with tilt protection",
+        str(gust_info["tilt_limited_steps"]),
+    )
+    tilt_protection_frame = pd.DataFrame({
+        "time_s": data["t"],
+        "Mission tilt request (deg)": data["tilt_cmd"],
+        "Controller tilt command (deg)": data["tilt_controller_cmd"],
+        "Actual tilt (deg)": data["tilt"],
+    })
+    st.line_chart(
+        tilt_protection_frame,
+        x="time_s",
+        y=[
+            "Mission tilt request (deg)",
+            "Controller tilt command (deg)",
+            "Actual tilt (deg)",
+        ],
+        alt="Requested, protected, and actual nacelle tilt during the mission",
+    )
+    allocation_frame = pd.DataFrame(
+        gust_info["allocation_matrix"],
+        index=ControlAllocator.output_labels,
+        columns=ControlAllocator.actuator_labels,
+    )
+    st.dataframe(
+        allocation_frame,
+        alt="Local control allocation matrix from six actuators to collective thrust and body moments",
+    )
+    st.caption(
+        "Rotor columns are derivatives per newton of rotor thrust; V-tail columns are "
+        "moment derivatives per radian. Allocation is bounded by motor speed and ±11.5° "
+        "tail travel; the reported residual exposes requests the actuators cannot meet."
+    )
+    if gust_info["allocation_saturation_fraction"] > 0.05:
+        st.warning(
+            "Actuator limits or the available control axes prevented at least 5% of "
+            "simulation-step requests from being allocated within tolerance."
+        )
+    if gust_info["tilt_limited_steps"] > 0:
+        st.warning(
+            "Nacelle tilt was held or reduced when pitch allocation was short or "
+            "pitch attitude/rate exceeded the controller's protection limits."
+        )
+
+with rate_tab:
+    rate_data = pd.DataFrame({
+        "time_s": data["t"],
+        "p actual (deg/s)": np.rad2deg(data["body_p"]),
+        "p target (deg/s)": np.rad2deg(data["desired_p"]),
+        "q actual (deg/s)": np.rad2deg(data["body_q"]),
+        "q target (deg/s)": np.rad2deg(data["desired_q"]),
+        "r actual (deg/s)": np.rad2deg(data["body_r"]),
+        "r target (deg/s)": np.rad2deg(data["desired_r"]),
+    })
+    st.line_chart(
+        rate_data,
+        x="time_s",
+        y=[
+            "p actual (deg/s)", "p target (deg/s)",
+            "q actual (deg/s)", "q target (deg/s)",
+            "r actual (deg/s)", "r target (deg/s)",
+        ],
+        alt="Actual and commanded roll, pitch, and yaw rates",
+    )
+    st.caption(
+        "The inner loop compares body rates p, q, r with the outer-loop rate targets "
+        "and requests body moments, subject to the allocator and actuator limits."
+    )
+
+with attitude_tab:
+    attitude_data = pd.DataFrame({
+        "time_s": data["t"],
+        "Roll actual (deg)": data["roll"],
+        "Roll target (deg)": np.rad2deg(data["desired_roll"]),
+        "Pitch actual (deg)": data["pitch"],
+        "Pitch target (deg)": data["desired_pitch"],
+        "Heading actual (deg)": data["yaw"],
+        "Heading target (deg)": np.rad2deg(data["desired_heading"]),
+    })
+    st.line_chart(
+        attitude_data,
+        x="time_s",
+        y=[
+            "Roll actual (deg)", "Roll target (deg)",
+            "Pitch actual (deg)", "Pitch target (deg)",
+            "Heading actual (deg)", "Heading target (deg)",
+        ],
+        alt="Actual roll, pitch, and heading compared with guidance targets",
+    )
+    st.caption(
+        "The outer loop converts roll, pitch, and wrapped heading errors into bounded "
+        "body-rate targets before the inner loop acts."
+    )
+
+with guidance_tab:
+    path_figure = go.Figure()
+    path_figure.add_trace(go.Scatter(
+        x=data["east"],
+        y=data["north"],
+        mode="lines",
+        name="Aircraft path",
+    ))
+    if gust_info["waypoints"]:
+        path_figure.add_trace(go.Scatter(
+            x=[waypoint[1] for waypoint in gust_info["waypoints"]],
+            y=[waypoint[0] for waypoint in gust_info["waypoints"]],
+            mode="markers+lines",
+            marker=dict(size=9, symbol="x"),
+            name="Mission waypoints",
+        ))
+    path_figure.update_layout(
+        xaxis_title="East (m)",
+        yaxis_title="North (m)",
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=360,
+    )
+    st.plotly_chart(
+        path_figure,
+        width="stretch",
+        alt="Simulated north-east flight path and commanded waypoints",
+    )
+    altitude_tracking, speed_tracking = st.columns(2)
+    with altitude_tracking:
+        st.line_chart(
+            pd.DataFrame({
+                "time_s": data["t"],
+                "Altitude (m)": data["alt"],
+                "Target altitude (m)": data["ref_alt"],
+            }),
+            x="time_s",
+            y=["Altitude (m)", "Target altitude (m)"],
+            alt="Guidance altitude tracking",
+        )
+    with speed_tracking:
+        st.line_chart(
+            pd.DataFrame({
+                "time_s": data["t"],
+                "Airspeed (m/s)": data["airspeed_mps"],
+                "Target speed (m/s)": data["ref_speed"],
+            }),
+            x="time_s",
+            y=["Airspeed (m/s)", "Target speed (m/s)"],
+            alt="Guidance airspeed tracking",
+        )
+    guidance_metrics = st.columns(3)
+    guidance_metrics[0].metric(
+        "Final path distance",
+        f"{float(data['guidance_path_distance'][-1]):.1f} m",
+    )
+    guidance_metrics[1].metric(
+        "Final altitude error",
+        f"{float(data['guidance_altitude_error'][-1]):.2f} m",
+    )
+    guidance_metrics[2].metric(
+        "Final heading error",
+        f"{np.rad2deg(float(data['guidance_heading_error'][-1])):.1f}°",
+    )
+    st.caption(
+        "Position guidance steers toward the active north/east waypoint; altitude and "
+        "airspeed references feed the vertical-thrust and pitch commands."
+    )
+
+with schedule_tab:
+    blend_data = pd.DataFrame({
+        "time_s": data["t"],
+        "Transition blend (0 hover – 1 cruise)": data["gain_blend"],
+        "Airspeed (m/s)": data["airspeed_mps"],
+        "Nacelle tilt (deg)": data["tilt"],
+    })
+    st.line_chart(
+        blend_data,
+        x="time_s",
+        y=[
+            "Transition blend (0 hover – 1 cruise)",
+            "Airspeed (m/s)",
+            "Nacelle tilt (deg)",
+        ],
+        alt="Transition gain-scheduling blend with airspeed and nacelle tilt",
+    )
+    scheduled_gain_data = pd.DataFrame({
+        "time_s": data["t"],
+        "Rate Kp": data["gain_kp"],
+        "Rate Ki": data["gain_ki"],
+        "Rate Kd": data["gain_kd"],
+    })
+    st.line_chart(
+        scheduled_gain_data,
+        x="time_s",
+        y=["Rate Kp", "Rate Ki", "Rate Kd"],
+        alt="Rate PID gains scheduled through transition",
+    )
+    st.caption(
+        "The schedule linearly blends hover and cruise rate gains using the mean of "
+        "normalized airspeed (0–20 m/s) and nacelle tilt (0–90°). Hover and cruise "
+        "gain scales are adjustable in the PID sidebar."
+    )
 
 # ==========================================================
 # 3D COORDINATE FRAME & CAD MODEL VISUALIZATION

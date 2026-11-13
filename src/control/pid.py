@@ -14,15 +14,11 @@ class PIDController:
         self.kd = kd
 
     def compute(self, setpoint: float, measurement: float, dt: float) -> float:
-        if dt <= 0: return 0.0
+        if dt <= 0:
+            return 0.0
         
         error = setpoint - measurement
         p_term = self.kp * error
-        
-        self.integral += error * dt
-        i_term = self.ki * self.integral
-        if i_term > self.limit: i_term = self.limit
-        if i_term < -self.limit: i_term = -self.limit
         
         if self.prev_measurement is None:
             self.prev_measurement = measurement
@@ -30,5 +26,17 @@ class PIDController:
         d_term = -self.kd * d_measurement
         self.prev_measurement = measurement
 
-        output = p_term + i_term + d_term
-        return max(-self.limit, min(self.limit, output))
+        candidate_integral = self.integral + error * dt
+        if self.ki != 0.0:
+            integral_bounds = sorted((
+                (-self.limit - p_term - d_term) / self.ki,
+                (self.limit - p_term - d_term) / self.ki,
+            ))
+            candidate_integral = max(
+                integral_bounds[0],
+                min(integral_bounds[1], candidate_integral),
+            )
+        self.integral = candidate_integral
+        output = p_term + self.ki * self.integral + d_term
+
+        return float(max(-self.limit, min(self.limit, output)))
