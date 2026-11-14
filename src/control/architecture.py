@@ -7,9 +7,11 @@ from typing import Any
 import numpy as np
 
 from src.allocation.allocator import ControlAllocator
-from src.dynamics.frames import rotation_earth_to_body
+from src.control.envelope_protection import EnvelopeProtection
 from src.control.pid import PIDController
 from src.control.scheduler import GainScheduler
+from src.control.transition_observer import TransitionStateObserver
+from src.dynamics.frames import euler_rates_to_body_rates, rotation_earth_to_body
 from src.dynamics.tiltrotor import GRAVITY
 
 
@@ -33,6 +35,8 @@ class ControlLawArchitecture:
         cruise_rate_scale: float = 0.75,
         max_tail_deflection_rad: float = 0.2,
         max_moment_nm: float = 5.0,
+        transition_observer: TransitionStateObserver | None = None,
+        envelope_protection: EnvelopeProtection | None = None,
     ):
         self.mass = float(mass)
         if not np.isfinite(self.mass) or self.mass <= 0.0:
@@ -77,6 +81,9 @@ class ControlLawArchitecture:
             for position in self.motor_positions
         )
         self.aero_model = aero_model
+        self.transition_observer = transition_observer or TransitionStateObserver()
+        self.envelope_protection = envelope_protection
+        self._last_control_authority = 1.0
         self.vtail_model = (
             aero_model.vtail
             if aero_model is not None
@@ -271,6 +278,7 @@ class ControlLawArchitecture:
         wind_earth: np.ndarray | None = None,
         *,
         actuator_tilt_rad: float | None = None,
+        available_control_authority: float | None = None,
     ) -> dict[str, Any]:
         """Compute guidance, attitude/rate feedback, scheduled gains, and actuator commands."""
         if not np.isfinite(dt) or dt <= 0.0:
@@ -282,9 +290,30 @@ class ControlLawArchitecture:
         actuator_tilt = float(state.tilt if actuator_tilt_rad is None else actuator_tilt_rad)
         actuator_tilt = float(np.clip(actuator_tilt, 0.0, np.pi / 2.0))
         air_velocity_earth = np.asarray(state.vel, dtype=float) - wind
+        transition_estimate = self.transition_observer.update(state, wind, dt)
+        control_authority = (
+            self._last_control_authority
+            if available_control_authority is None
+            else float(available_control_authority)
+        )
+        if not np.isfinite(control_authority) or not 0.0 <= control_authority <= 1.0:
+            raise ValueError("available control authority must be between 0 and 1")
+        requested_speed = float(reference.get("speed", 0.0))
+        requested_tilt = float(reference.get("tilt", state.tilt))
+        effective_reference = dict(reference)
+        protection = None
+        if self.envelope_protection is not None:
+            protection = self.envelope_protection.apply(
+                requested_speed,
+                requested_tilt,
+                transition_estimate,
+                available_control_authority=control_authority,
+            )
+            effective_reference["speed"] = protection.speed_mps
+            effective_reference["tilt"] = protection.tilt_rad
         guidance = self._guidance(
             state,
-            reference,
+            effective_reference,
             air_velocity_earth,
             wind,
             actuator_tilt,
@@ -298,7 +327,7 @@ class ControlLawArchitecture:
             guidance["desired_pitch"],
             current_attitude[2] + yaw_error,
         ])
-        desired_rates = np.array([
+        desired_euler_rates = np.array([
             controller.compute(float(target), float(measurement), dt)
             for controller, target, measurement in zip(
                 self.attitude_controllers,
@@ -306,6 +335,11 @@ class ControlLawArchitecture:
                 current_attitude,
             )
         ])
+        desired_rates = euler_rates_to_body_rates(
+            float(current_attitude[0]),
+            float(current_attitude[1]),
+            desired_euler_rates,
+        )
 
         current_speed = guidance["current_speed"]
         scheduled_gains = self.gain_scheduler.get_gains(current_speed, actuator_tilt)
@@ -395,6 +429,10 @@ class ControlLawArchitecture:
 
         self.last_allocation_matrix = np.asarray(allocation["allocation_matrix"], dtype=float)
         self.last_allocation_residual = np.asarray(allocation["allocation_residual"], dtype=float)
+        residual_fraction = float(
+            np.max(np.abs(allocation["allocation_residual_normalized"]))
+        )
+        self._last_control_authority = float(np.clip(1.0 - residual_fraction, 0.0, 1.0))
 
         return {
             **allocation,
@@ -412,6 +450,12 @@ class ControlLawArchitecture:
             "gain_ki": scheduled_gains["ki"],
             "gain_kd": scheduled_gains["kd"],
             "airspeed_mps": current_speed,
+            "transition_airspeed_mps": transition_estimate.airspeed_mps,
+            "transition_alpha_rad": transition_estimate.alpha_rad,
+            "transition_beta_rad": transition_estimate.beta_rad,
+            "transition_blend": transition_estimate.transition_blend,
+            "transition_phase": transition_estimate.phase,
+            "available_control_authority": control_authority,
             "guidance_altitude_error": guidance["altitude_error"],
             "guidance_speed_error": guidance["speed_error"],
             "guidance_north_error": guidance["north_error"],
@@ -420,7 +464,14 @@ class ControlLawArchitecture:
             "guidance_path_distance": guidance["path_distance"],
             "requested_thrust": guidance["requested_thrust"],
             "vertical_acceleration_command": guidance["vertical_acceleration"],
-            "requested_tilt": guidance["target_tilt"],
+            "requested_speed": requested_speed,
+            "protected_speed": guidance["target_speed"],
+            "requested_tilt": requested_tilt,
+            "protected_tilt": guidance["target_tilt"],
+            "envelope_protection_active": protection is not None,
+            "envelope_protected": protection.protected if protection is not None else False,
+            "envelope_within": protection.within_envelope if protection is not None else True,
+            "envelope_reasons": protection.reasons if protection is not None else (),
             "tilt_limited": tilt_limited,
             "tilt": tilt_command,
         }

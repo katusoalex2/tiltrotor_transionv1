@@ -156,6 +156,39 @@ def test_control_architecture_wraps_heading_error_across_pi():
     assert abs(command["desired_r"]) < 0.1
 
 
+def test_outer_loop_converts_euler_rate_targets_to_body_rates():
+    controller = ControlLawArchitecture(
+        mass=5.0,
+        k_thrust=1e-5,
+        max_omega=3000.0,
+        motor_positions=MOTOR_POSITIONS,
+        attitude_gains={"kp": 1.0, "ki": 0.0, "kd": 0.0},
+    )
+    roll, pitch = np.deg2rad([10.0, 20.0])
+    state = AircraftState(
+        pos=np.array([0.0, 0.0, -20.0]),
+        att=np.array([roll, pitch, 0.0]),
+    )
+
+    command = controller.compute(
+        state,
+        {"altitude": 20.0, "speed": 0.0, "heading": 0.0},
+        dt=0.01,
+    )
+
+    euler_roll_rate = -roll
+    euler_pitch_rate = -pitch
+    expected_body_rates = np.array([
+        euler_roll_rate,
+        euler_pitch_rate * np.cos(roll),
+        -euler_pitch_rate * np.sin(roll),
+    ])
+    np.testing.assert_allclose(
+        [command["desired_p"], command["desired_q"], command["desired_r"]],
+        expected_body_rates,
+    )
+
+
 def test_control_architecture_allocates_aerodynamic_pitch_bias():
     vtail = VtailModel(area=0.1, arm_length=0.5)
     aero = AeroModel(wing_area=0.6, vtail=vtail, prop_diameter_m=0.3048)

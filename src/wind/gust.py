@@ -1,4 +1,7 @@
-﻿"""Atmospheric wind models used by the tilt-rotor simulation."""
+"""Atmospheric wind models used by the tilt-rotor simulation."""
+
+from __future__ import annotations
+
 import numpy as np
 
 
@@ -38,30 +41,78 @@ class ConstantGust(WindField):
         return self.gust.copy()
 
 
-class DrydenGust(WindField):
-    """A lightweight Dryden-like gust model with smooth, reproducible samples."""
+class DiscreteGust(WindField):
+    """Finite-duration half-cosine gust with NED wind components."""
 
-    def __init__(self, sigma=(0.0, 0.0, 0.0), airspeed=15.0, seed=None, tau=1.0):
+    def __init__(
+        self,
+        start_time_s: float,
+        duration_s: float,
+        peak_wind_ned: tuple[float, float, float],
+    ):
+        super().__init__()
+        self.start_time_s = float(start_time_s)
+        self.duration_s = float(duration_s)
+        self.peak_wind_ned = np.asarray(peak_wind_ned, dtype=float)
+        if not np.isfinite(self.start_time_s) or self.start_time_s < 0.0:
+            raise ValueError("gust start time must be finite and non-negative")
+        if not np.isfinite(self.duration_s) or self.duration_s <= 0.0:
+            raise ValueError("gust duration must be positive and finite")
+        if self.peak_wind_ned.shape != (3,) or not np.all(np.isfinite(self.peak_wind_ned)):
+            raise ValueError("peak gust wind must be a finite NED 3-vector")
+
+    def get_wind(self, t: float, altitude: float = 100.0) -> np.ndarray:
+        t = float(t)
+        if not np.isfinite(t):
+            raise ValueError("gust time must be finite")
+        if t < self.start_time_s or t > self.start_time_s + self.duration_s:
+            return np.zeros(3, dtype=float)
+        phase = (t - self.start_time_s) / self.duration_s
+        scale = 0.5 * (1.0 - np.cos(2.0 * np.pi * phase))
+        return scale * self.peak_wind_ned
+
+    def step(self, dt: float) -> np.ndarray:
+        dt = float(dt)
+        if not np.isfinite(dt) or dt < 0.0:
+            raise ValueError("time step must be finite and non-negative")
+        self.time += dt
+        return self.get_wind(self.time)
+
+    def reset(self) -> None:
+        self.time = 0.0
+
+
+class DrydenGust(WindField):
+    """A seeded first-order Dryden-like turbulence approximation."""
+
+    def __init__(self, sigma=(1.0, 1.0, 1.0), airspeed=15.0, seed=None, tau=1.0):
         super().__init__()
         self.sigma = np.asarray(sigma, dtype=float)
         if self.sigma.shape == ():
             self.sigma = np.full(3, float(self.sigma))
-        if np.allclose(self.sigma, 0.0):
-            self.sigma = np.ones(3, dtype=float)
+        if self.sigma.shape != (3,) or not np.all(np.isfinite(self.sigma)) or np.any(self.sigma < 0.0):
+            raise ValueError("gust sigma must contain three finite non-negative values")
         self.airspeed = float(airspeed)
         self.tau = float(tau)
+        if not np.isfinite(self.airspeed) or self.airspeed < 0.0:
+            raise ValueError("airspeed must be finite and non-negative")
+        if not np.isfinite(self.tau) or self.tau <= 0.0:
+            raise ValueError("gust time constant must be positive and finite")
+        self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.gust = np.zeros(3, dtype=float)
         self.time = 0.0
 
     def step(self, dt: float) -> np.ndarray:
         dt = float(dt)
-        if dt <= 0.0:
+        if not np.isfinite(dt) or dt < 0.0:
+            raise ValueError("time step must be finite and non-negative")
+        if dt == 0.0:
             return self.gust.copy()
-
-        alpha = 0.12
-        noise = self.rng.normal(0.0, self.sigma * 4.0)
-        self.gust = (1.0 - alpha) * self.gust + alpha * noise
+        correlation_time = self.tau * 15.0 / max(self.airspeed, 0.1)
+        decay = np.exp(-dt / correlation_time)
+        innovation_std = self.sigma * np.sqrt(1.0 - decay**2)
+        self.gust = decay * self.gust + self.rng.normal(0.0, innovation_std)
         self.time += dt
         return self.gust.copy()
 
@@ -71,3 +122,4 @@ class DrydenGust(WindField):
     def reset(self):
         self.gust = np.zeros(3, dtype=float)
         self.time = 0.0
+        self.rng = np.random.default_rng(self.seed)

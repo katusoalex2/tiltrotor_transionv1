@@ -35,9 +35,14 @@ from src.aero.vtail import VtailModel
 from src.aero.aerodynamics import AeroModel
 from src.control.trajectory import ReferenceTrajectory
 from src.control.architecture import ControlLawArchitecture
+from src.control.envelope_protection import EnvelopeProtection
+from src.control.transition_observer import TransitionStateObserver
 from src.dynamics.mass_properties import MassProperties
 from src.dynamics.frames import rotation_body_to_earth
 from src.control.mission import MissionManager, MissionProfile, Waypoint
+from src.wind.gust import DiscreteGust as FiniteDurationGust, DrydenGust
+from src.simulation.failures import ACTUATOR_CHANNELS
+from src.simulation.monte_carlo import MonteCarloValidator
 
 
 # ==========================================================
@@ -51,39 +56,25 @@ with open(cfg_path, "r") as f:
 geo_path = os.path.join(base_dir, "configs", "geometry_offsets.yaml")
 cad = CadGeometry(geo_path)
 
-class DiscreteGust:
-    def __init__(self, start_time, duration, magnitude, direction):
-        self.start = start_time
-        self.duration = duration
-        self.mag = magnitude
-        self.dir = direction
-        self.end = start_time + duration
-
-    def get_wind(self, t):
-        if t < self.start or t > self.end:
-            return np.array([0.0, 0.0, 0.0])
-        frac = (t - self.start) / self.duration
-        shape = 0.5 * (1.0 - np.cos(2.0 * np.pi * frac))
-        current_mag = self.mag * shape
-        if self.dir == "Front": return np.array([current_mag, 0.0, 0.0])
-        if self.dir == "Back": return np.array([-current_mag, 0.0, 0.0])
-        if self.dir == "Right": return np.array([0.0, current_mag, 0.0])
-        if self.dir == "Left": return np.array([0.0, -current_mag, 0.0])
-        if self.dir == "Up": return np.array([0.0, 0.0, -current_mag])
-        if self.dir == "Down": return np.array([0.0, 0.0, current_mag])
-        if self.dir == "Diagonal": 
-            m = current_mag / np.sqrt(3)
-            return np.array([m, m, -m])
-        return np.array([0.0, 0.0, 0.0])
+GUST_DIRECTION_VECTORS = {
+    "Front": np.array([1.0, 0.0, 0.0]),
+    "Back": np.array([-1.0, 0.0, 0.0]),
+    "Right": np.array([0.0, 1.0, 0.0]),
+    "Left": np.array([0.0, -1.0, 0.0]),
+    "Up": np.array([0.0, 0.0, -1.0]),
+    "Down": np.array([0.0, 0.0, 1.0]),
+    "Diagonal": np.array([1.0, 1.0, -1.0]) / np.sqrt(3.0),
+}
 
 st.set_page_config(page_title="Tilt-rotor systems dashboard", layout="wide")
 st.title("Tilt-rotor systems dashboard")
 st.caption(
-    "Aircraft configuration · aerodynamics · propulsion and tilt · guidance and control · mission management"
+    "Aircraft configuration · aerodynamics · propulsion and tilt · guidance and control · "
+    "mission management · disturbance rejection and safety"
 )
 
 st.sidebar.title("Aircraft and mission setup")
-side_tabs = st.sidebar.tabs(["Body", "Prop", "Geom", "Aero", "PID", "Gust", "Mission"])
+side_tabs = st.sidebar.tabs(["Body", "Prop", "Geom", "Aero", "PID", "Gust", "Mission", "Safety"])
 
 with side_tabs[0]:
     st.markdown("**Component Masses (kg)**")
@@ -213,15 +204,33 @@ with side_tabs[4]:
     )
 
 with side_tabs[5]:
-    gust_enabled = st.checkbox("Enable Wind Gust", value=True)
-    random_gust = st.checkbox("Randomize (Monte Carlo)", value=False)
-    if not random_gust:
+    gust_enabled = st.checkbox("Enable wind disturbance", value=True, key="gust_enabled")
+    gust_model = st.selectbox(
+        "Wind model",
+        ["Finite-duration gust", "Dryden turbulence"],
+        disabled=not gust_enabled,
+        key="gust_model",
+    )
+    if gust_enabled and gust_model == "Finite-duration gust":
         gust_start = st.slider("Start Time (s)", 0.0, 15.0, 5.0, 0.5)
         gust_duration = st.slider("Duration (s)", 0.5, 5.0, 2.0, 0.5)
         gust_mag = st.slider("Magnitude (m/s)", 0.0, 15.0, 6.0, 0.5)
         gust_dir = st.selectbox("Direction", ["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"])
+        dryden_sigma = 2.5
+        dryden_tau_s = 1.0
+    elif gust_enabled:
+        dryden_sigma = st.slider(
+            "Longitudinal and lateral gust σ (m/s)", 0.0, 8.0, 2.5, 0.25,
+            key="dryden_sigma",
+        )
+        dryden_tau_s = st.slider(
+            "Gust correlation time (s)", 0.1, 5.0, 1.0, 0.1,
+            key="dryden_tau_s",
+        )
+        gust_start, gust_duration, gust_mag, gust_dir = 0.0, 63.0, 0.0, "Dryden turbulence"
     else:
-        gust_start, gust_duration, gust_mag, gust_dir = 0, 0, 0, "Front"
+        gust_start, gust_duration, gust_mag, gust_dir = 0.0, 0.0, 0.0, "None"
+        dryden_sigma, dryden_tau_s = 0.0, 1.0
 
 with side_tabs[6]:
     flight_plan = st.selectbox(
@@ -283,6 +292,49 @@ with side_tabs[6]:
             st.error("Waypoint tilt must be between 0 and 90 degrees.")
             st.stop()
 
+with side_tabs[7]:
+    st.markdown("**Transition protection**")
+    enable_envelope_protection = st.checkbox(
+        "Enable envelope protection", value=True, key="enable_envelope_protection"
+    )
+    observer_time_constant_s = st.slider(
+        "Observer filter time constant (s)", 0.05, 1.0, 0.25, 0.05,
+        key="observer_time_constant_s",
+    )
+    max_alpha_deg = st.slider(
+        "Maximum angle of attack (deg)", 5.0, 30.0, 15.0, 1.0,
+        key="max_alpha_deg",
+    )
+    max_pitch_deg = st.slider(
+        "Maximum pitch protection limit (deg)", 20.0, 60.0, 60.0, 1.0,
+        key="max_pitch_deg",
+    )
+    max_body_rate_deg_s = st.slider(
+        "Maximum body rate (deg/s)", 30.0, 240.0, 180.0, 5.0,
+        key="max_body_rate_deg_s",
+    )
+    speed_margin_mps = st.slider(
+        "Transition-envelope speed margin (m/s)", 0.0, 3.0, 0.5, 0.1,
+        key="speed_margin_mps",
+    )
+    st.markdown("**Monte Carlo validation**")
+    monte_carlo_trials = st.number_input(
+        "Trial count", min_value=2, max_value=30, value=10, step=1,
+        key="monte_carlo_trials",
+    )
+    monte_carlo_seed = st.number_input(
+        "Random seed", min_value=0, value=42, step=1, key="monte_carlo_seed"
+    )
+    monte_carlo_gust_sigma = st.slider(
+        "Maximum gust σ (m/s)", 0.0, 8.0, 3.0, 0.25,
+        key="monte_carlo_gust_sigma",
+    )
+    monte_carlo_failure_probability = st.slider(
+        "Actuator failure probability", 0.0, 1.0, 0.1, 0.05,
+        key="monte_carlo_failure_probability",
+    )
+    st.caption("Actuator faults begin between 5 and 45 s; each trial uses a reproducible seed.")
+
 # Map gust settings to the wind variables expected by run_simulation
 wind_enabled = gust_enabled
 wind_speed = gust_mag
@@ -291,7 +343,7 @@ wind_turbulence = gust_duration   # (see note below)
 surface_roughness = gust_dir      # (see note below)
 
 @st.cache_data
-def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, hover_rate_scale, cruise_rate_scale, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows):
+def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, hover_rate_scale, cruise_rate_scale, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows, gust_model="Finite-duration gust", dryden_sigma_mps=(2.5, 2.5, 1.5), dryden_tau_s=1.0, dryden_seed=0, enable_envelope_protection=True, observer_time_constant_s=0.25, max_alpha_deg=15.0, max_pitch_deg=60.0, max_body_rate_deg_s=180.0, speed_margin_mps=0.5, actuator_failure=None):
     dt, duration = 0.01, 63.0
     
     rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
@@ -315,6 +367,37 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     props.neutral_point_x = props._calculate_neutral_point()
     
     dyn = TiltrotorDynamics(mass=mass, rotor=rotor, mass_props=props, aero=aero)
+    maximum_rotor_thrust = rotor.compute_thrust(max_omega, height_above_ground=100.0)
+    maximum_lift_coefficient = aero.CL_0 + aero.CL_alpha * aero.stall_angle
+    transition_envelope = transition_speed_envelope(
+        mass=mass,
+        wing_area=wing_area,
+        max_thrust_per_rotor=maximum_rotor_thrust,
+        rotor_tilts=[bool(position[3]) for position in motor_positions],
+        rho=aero.rho,
+        cl_max=maximum_lift_coefficient,
+        cd_0=aero.CD_0,
+        aspect_ratio=aero.AR,
+    )
+    feasible_envelope = (
+        transition_envelope["feasible"]
+        & np.isfinite(transition_envelope["minimum_speed_mps"])
+        & np.isfinite(transition_envelope["maximum_speed_mps"])
+    )
+    transition_observer = TransitionStateObserver(
+        time_constant_s=observer_time_constant_s
+    )
+    envelope_protection = (
+        EnvelopeProtection(
+            transition_envelope,
+            max_alpha_rad=np.deg2rad(max_alpha_deg),
+            max_pitch_rad=np.deg2rad(max_pitch_deg),
+            max_body_rate_rad_s=np.deg2rad(max_body_rate_deg_s),
+            speed_margin_mps=speed_margin_mps,
+        )
+        if enable_envelope_protection and np.any(transition_envelope["feasible"])
+        else None
+    )
     
     controller = ControlLawArchitecture(
         mass=mass,
@@ -329,6 +412,8 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         rate_gains={"kp": rate_kp, "ki": rate_ki, "kd": rate_kd},
         hover_rate_scale=hover_rate_scale,
         cruise_rate_scale=cruise_rate_scale,
+        transition_observer=transition_observer,
+        envelope_protection=envelope_protection,
     )
     ref = MissionProfile()
     waypoints = [
@@ -344,8 +429,20 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     ]
     mission_manager = MissionManager(waypoints)
     
-    if gust_enabled:
-        gust = DiscreteGust(gust_start, gust_duration, gust_mag, gust_dir)
+    if gust_enabled and gust_model == "Finite-duration gust":
+        peak_wind = gust_mag * GUST_DIRECTION_VECTORS[gust_dir]
+        gust = FiniteDurationGust(
+            gust_start,
+            gust_duration,
+            tuple(float(value) for value in peak_wind),
+        )
+    elif gust_enabled and gust_model == "Dryden turbulence":
+        gust = DrydenGust(
+            sigma=dryden_sigma_mps,
+            airspeed=max(12.0, manual_speed),
+            seed=dryden_seed,
+            tau=dryden_tau_s,
+        )
     else:
         gust = None
 
@@ -364,7 +461,8 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     
     log = {
         "t": [], "alt": [], "ref_alt": [], "pitch": [], "desired_pitch": [], 
-        "wind": [], "tilt": [], "roll": [], "yaw": [], "ld_ratio": [], 
+        "wind": [], "wind_north": [], "wind_east": [], "wind_down": [],
+        "tilt": [], "roll": [], "yaw": [], "ld_ratio": [],
         "current": [], "voltage": [], "ground_effect": [], "u_body": [], 
         "w_body": [], "v_body": [], "V_T": [], "beta": [], 
         "rotor_lift": [], "wing_lift": [], "wash_lift": [], "handoff_ratio": [],
@@ -388,6 +486,11 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         "guidance_north_error": [], "guidance_east_error": [],
         "guidance_heading_error": [], "guidance_path_distance": [],
         "requested_thrust": [], "vertical_acceleration_command": [], "requested_tilt": [],
+        "requested_speed": [], "protected_speed": [], "protected_tilt": [],
+        "transition_airspeed": [], "transition_alpha_rad": [], "transition_beta_rad": [],
+        "transition_blend": [], "transition_phase": [], "available_control_authority": [],
+        "envelope_protected": [], "envelope_within": [], "envelope_reasons": [],
+        "failure_active": [],
     }
     
     from src.dynamics.frames import rotation_earth_to_body
@@ -415,7 +518,12 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         else:
             r = ref.at(t)
 
-        wind_vec = gust.get_wind(t) if gust is not None else np.array([0.0, 0.0, 0.0])
+        if isinstance(gust, DrydenGust):
+            wind_vec = gust.step(dt)
+        elif gust is not None:
+            wind_vec = gust.get_wind(t, altitude=max(-state.pos[2], 0.0))
+        else:
+            wind_vec = np.zeros(3, dtype=float)
         tilt_error = r["tilt"] - state.tilt
         tilt_step = np.deg2rad(max_tilt_rate_deg_s) * dt
         actual_tilt = state.tilt + np.clip(tilt_error, -tilt_step, tilt_step)
@@ -426,6 +534,13 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
             wind_vec,
             actuator_tilt_rad=actual_tilt,
         )
+        failure_active = actuator_failure is not None and t >= actuator_failure.start_time_s
+        if actuator_failure is not None:
+            failed_commands = actuator_failure.apply(
+                {name: cmd[name] for name in ACTUATOR_CHANNELS},
+                t,
+            )
+            cmd.update(failed_commands)
         actual_tilt = state.tilt + np.clip(
             cmd["tilt"] - state.tilt,
             -tilt_step,
@@ -454,6 +569,26 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["w_body"].append(vel_body[2])
         log["V_T"].append(V_T_current)
         log["beta"].append(beta_current)
+        if np.any(feasible_envelope):
+            envelope_tilt_deg = np.rad2deg(state.tilt)
+            minimum_envelope_speed = float(np.interp(
+                envelope_tilt_deg,
+                transition_envelope["tilt_deg"][feasible_envelope],
+                transition_envelope["minimum_speed_mps"][feasible_envelope],
+            ))
+            maximum_envelope_speed = float(np.interp(
+                envelope_tilt_deg,
+                transition_envelope["tilt_deg"][feasible_envelope],
+                transition_envelope["maximum_speed_mps"][feasible_envelope],
+            ))
+            inside_envelope = (
+                minimum_envelope_speed - speed_margin_mps
+                <= V_T_current
+                <= maximum_envelope_speed + speed_margin_mps
+            )
+        else:
+            inside_envelope = False
+        log["envelope_within"].append(bool(inside_envelope))
         
         # --- LIFT HANDOFF LOGGING ---
         total_thrust = sum(
@@ -479,6 +614,9 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["pitch"].append(np.rad2deg(state.att[1]))
         log["desired_pitch"].append(np.rad2deg(cmd["desired_pitch"]))
         log["wind"].append(np.linalg.norm(wind_vec))
+        log["wind_north"].append(wind_vec[0])
+        log["wind_east"].append(wind_vec[1])
+        log["wind_down"].append(wind_vec[2])
         log["tilt"].append(np.rad2deg(state.tilt))
         log["tilt_cmd"].append(np.rad2deg(r["tilt"]))
         log["tilt_controller_cmd"].append(np.rad2deg(cmd["tilt"]))
@@ -535,8 +673,20 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
             "requested_thrust",
             "vertical_acceleration_command",
             "requested_tilt",
+            "requested_speed",
+            "protected_speed",
+            "protected_tilt",
+            "available_control_authority",
+            "envelope_protected",
         ):
             log[key].append(cmd[key])
+        log["transition_airspeed"].append(cmd["transition_airspeed_mps"])
+        log["transition_alpha_rad"].append(cmd["transition_alpha_rad"])
+        log["transition_beta_rad"].append(cmd["transition_beta_rad"])
+        log["transition_blend"].append(cmd["transition_blend"])
+        log["transition_phase"].append(cmd["transition_phase"])
+        log["envelope_reasons"].append(", ".join(cmd["envelope_reasons"]))
+        log["failure_active"].append(failure_active)
         log["allocation_residual"].append(
             float(np.max(np.abs(cmd["allocation_residual_normalized"])))
         )
@@ -560,6 +710,10 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         "dur": gust_duration,
         "mag": gust_mag if gust_enabled else 0,
         "dir": gust_dir,
+        "wind_model": gust_model if gust_enabled else "None",
+        "gust_sigma_mps": tuple(dryden_sigma_mps),
+        "failure": actuator_failure,
+        "envelope_protection_active": envelope_protection is not None,
         "mode": mission_mode,
         "plan": flight_plan,
         "waypoints": waypoint_rows,
@@ -571,28 +725,90 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         "allocation_saturation_fraction": float(np.mean(log["allocation_saturated"]))
         if log["allocation_saturated"] else 0.0,
         "tilt_limited_steps": int(np.count_nonzero(log["tilt_limited"])),
+        "envelope_protected_fraction": float(np.mean(log["envelope_protected"]))
+        if log["envelope_protected"] else 0.0,
+        "envelope_outside_fraction": float(1.0 - np.mean(log["envelope_within"]))
+        if log["envelope_within"] else 0.0,
+        "failure_active_steps": int(np.count_nonzero(log["failure_active"])),
     }
     return {k: np.array(v) for k, v in log.items()}, info
 
+simulation_parameters = {
+    "mass": mass,
+    "mass_fuselage": mass_fuselage,
+    "mass_wing": mass_wing,
+    "mass_vtail": mass_vtail,
+    "mass_motor": mass_motor,
+    "battery_cells": battery_cells,
+    "battery_mah": battery_mah,
+    "battery_c_rating": battery_c_rating,
+    "motor_kv": motor_kv,
+    "prop_dia": prop_dia,
+    "prop_pitch": prop_pitch,
+    "num_blades": num_blades,
+    "k_thrust": k_thrust,
+    "max_omega": max_omega,
+    "wing_area": wing_area,
+    "vtail_area": vtail_area,
+    "vtail_arm": vtail_arm,
+    "root_x": root_x,
+    "root_c": root_c,
+    "tip_c": tip_c,
+    "wingspan": 2.0 * tip_y,
+    "sweep": sweep,
+    "motor_positions": tuple(tuple(position) for position in motor_positions),
+    "alt_kp": alt_kp,
+    "alt_ki": alt_ki,
+    "alt_kd": alt_kd,
+    "spd_kp": spd_kp,
+    "spd_ki": spd_ki,
+    "spd_kd": spd_kd,
+    "att_kp": att_kp,
+    "att_ki": att_ki,
+    "att_kd": att_kd,
+    "rate_kp": rate_kp,
+    "rate_ki": rate_ki,
+    "rate_kd": rate_kd,
+    "hover_rate_scale": hover_rate_scale,
+    "cruise_rate_scale": cruise_rate_scale,
+    "gust_enabled": gust_enabled,
+    "gust_start": gust_start,
+    "gust_duration": gust_duration,
+    "gust_mag": gust_mag,
+    "gust_dir": gust_dir,
+    "max_tilt_rate_deg_s": max_tilt_rate_deg_s,
+    "flight_plan": flight_plan,
+    "mission_mode": mission_mode,
+    "manual_altitude": manual_altitude,
+    "manual_speed": manual_speed,
+    "manual_tilt_deg": manual_tilt_deg,
+    "waypoint_rows": waypoint_rows,
+    "gust_model": gust_model,
+    "dryden_sigma_mps": (dryden_sigma, dryden_sigma, dryden_sigma * 0.6),
+    "dryden_tau_s": dryden_tau_s,
+    "dryden_seed": 42,
+    "enable_envelope_protection": enable_envelope_protection,
+    "observer_time_constant_s": observer_time_constant_s,
+    "max_alpha_deg": max_alpha_deg,
+    "max_pitch_deg": max_pitch_deg,
+    "max_body_rate_deg_s": max_body_rate_deg_s,
+    "speed_margin_mps": speed_margin_mps,
+    "actuator_failure": None,
+}
+
 with st.spinner("Running simulation..."):
-    data, gust_info = run_simulation(
-        mass, mass_fuselage, mass_wing, mass_vtail, mass_motor,
-        battery_cells, battery_mah, battery_c_rating, motor_kv,
-        prop_dia, prop_pitch, num_blades, k_thrust, max_omega,
-        wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, 2.0 * tip_y,
-        sweep, tuple(tuple(position) for position in motor_positions),
-        alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd,
-        att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd,
-        hover_rate_scale, cruise_rate_scale,
-        gust_enabled, gust_start, gust_duration, gust_mag, gust_dir,
-        max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude,
-        manual_speed, manual_tilt_deg, waypoint_rows
-    )
+    data, gust_info = run_simulation(**simulation_parameters)
 if data["t"].size == 0:
     st.error("The simulation ended before producing a valid flight sample.")
     st.stop()
 
-if wind_enabled and gust_info["mag"] > 0.0:
+if gust_info["wind_model"] == "Dryden turbulence":
+    st.info(
+        "Wind model: seeded Dryden-like turbulence "
+        f"(σ={gust_info['gust_sigma_mps'][0]:.1f}/{gust_info['gust_sigma_mps'][1]:.1f}/"
+        f"{gust_info['gust_sigma_mps'][2]:.1f} m/s; τ={dryden_tau_s:.1f} s)."
+    )
+elif wind_enabled and gust_info["mag"] > 0.0:
     st.info(
         f"Wind event: {gust_info['dir']} at {gust_info['mag']:.1f} m/s, "
         f"starting at t={gust_info['start']:.1f}s for {gust_info['dur']:.1f}s."
@@ -1631,6 +1847,354 @@ with schedule_tab:
         "normalized airspeed (0–20 m/s) and nacelle tilt (0–90°). Hover and cruise "
         "gain scales are adjustable in the PID sidebar."
     )
+
+# ==========================================================
+# PHASE 7: DISTURBANCE REJECTION AND SAFETY
+# ==========================================================
+st.markdown("---")
+st.subheader("Phase 7: Disturbance rejection and safety — the shield")
+st.caption(
+    "The backend now estimates air-relative transition state, protects commands against "
+    "the computed speed/tilt corridor, and supports seeded gust and actuator-failure trials."
+)
+gust_tab, observer_tab, envelope_tab, monte_carlo_tab = st.tabs([
+    "7.1 Gust model",
+    "7.2 Transition state observer",
+    "7.3 Envelope protection",
+    "7.4 Monte Carlo validation",
+])
+
+with gust_tab:
+    wind_metrics = st.columns(3)
+    wind_metrics[0].metric("Wind model", gust_info["wind_model"])
+    wind_metrics[1].metric("Peak wind", f"{float(np.max(data['wind'])):.2f} m/s")
+    wind_metrics[2].metric("Seed", str(simulation_parameters["dryden_seed"]))
+    wind_frame = pd.DataFrame({
+        "time_s": data["t"],
+        "North gust (m/s)": data["wind_north"],
+        "East gust (m/s)": data["wind_east"],
+        "Down gust (m/s)": data["wind_down"],
+        "Wind magnitude (m/s)": data["wind"],
+    })
+    st.line_chart(
+        wind_frame,
+        x="time_s",
+        y=[
+            "North gust (m/s)",
+            "East gust (m/s)",
+            "Down gust (m/s)",
+            "Wind magnitude (m/s)",
+        ],
+        alt="North, east, down, and total gust wind applied during the simulation",
+    )
+    if gust_info["wind_model"] == "Dryden turbulence":
+        st.caption(
+            "Dryden-like turbulence uses a seeded, correlated first-order process. "
+            f"Configured σ: {gust_info['gust_sigma_mps']} m/s; "
+            f"correlation time: {dryden_tau_s:.2f} s."
+        )
+    elif gust_info["wind_model"] == "Finite-duration gust":
+        st.caption(
+            f"Half-cosine gust: {gust_info['dir']}, peak {gust_info['mag']:.1f} m/s, "
+            f"from {gust_info['start']:.1f} s for {gust_info['dur']:.1f} s."
+        )
+    else:
+        st.info("Wind disturbance is disabled for this simulation.")
+
+with observer_tab:
+    observer_metrics = st.columns(4)
+    observer_metrics[0].metric(
+        "Estimated airspeed",
+        f"{float(data['transition_airspeed'][-1]):.2f} m/s",
+    )
+    observer_metrics[1].metric(
+        "Estimated angle of attack",
+        f"{np.rad2deg(float(data['transition_alpha_rad'][-1])):.2f}°",
+    )
+    observer_metrics[2].metric(
+        "Estimated sideslip",
+        f"{np.rad2deg(float(data['transition_beta_rad'][-1])):.2f}°",
+    )
+    observer_metrics[3].metric(
+        "Transition phase",
+        str(data["transition_phase"][-1]).title(),
+    )
+    observer_speed_col, observer_angle_col = st.columns(2)
+    observer_speed_col.line_chart(
+        pd.DataFrame({
+            "time_s": data["t"],
+            "Observer airspeed (m/s)": data["transition_airspeed"],
+            "Dynamics true airspeed (m/s)": data["V_T"],
+            "Reference speed (m/s)": data["ref_speed"],
+        }),
+        x="time_s",
+        y=[
+            "Observer airspeed (m/s)",
+            "Dynamics true airspeed (m/s)",
+            "Reference speed (m/s)",
+        ],
+        alt="Observer airspeed compared with dynamics true airspeed and commanded speed",
+    )
+    observer_angle_col.line_chart(
+        pd.DataFrame({
+            "time_s": data["t"],
+            "Angle of attack (deg)": np.rad2deg(data["transition_alpha_rad"]),
+            "Sideslip (deg)": np.rad2deg(data["transition_beta_rad"]),
+        }),
+        x="time_s",
+        y=["Angle of attack (deg)", "Sideslip (deg)"],
+        alt="Filtered angle-of-attack and sideslip estimates during transition",
+    )
+    st.line_chart(
+        pd.DataFrame({
+            "time_s": data["t"],
+            "Transition blend (0 hover – 1 cruise)": data["transition_blend"],
+            "Gain-schedule blend": data["gain_blend"],
+        }),
+        x="time_s",
+        y=["Transition blend (0 hover – 1 cruise)", "Gain-schedule blend"],
+        alt="Observer transition progress compared with the controller gain-schedule blend",
+    )
+    st.caption(
+        f"Observer filter time constant: {observer_time_constant_s:.2f} s. "
+        "Airspeed is computed from body-frame velocity relative to the simulated wind."
+    )
+
+with envelope_tab:
+    if gust_info["envelope_protection_active"]:
+        protection_status = "Active"
+    elif enable_envelope_protection:
+        protection_status = "Unavailable"
+        st.warning(
+            "Envelope protection was requested, but the current aircraft configuration "
+            "has no feasible transition-corridor samples, so no envelope filter was applied."
+        )
+    else:
+        protection_status = "Disabled"
+
+    envelope_metrics = st.columns(4)
+    envelope_metrics[0].metric("Protection", protection_status)
+    envelope_metrics[1].metric(
+        "Steps with protected commands",
+        f"{100.0 * gust_info['envelope_protected_fraction']:.1f}%",
+    )
+    envelope_metrics[2].metric(
+        "Steps outside corridor",
+        f"{100.0 * gust_info['envelope_outside_fraction']:.1f}%",
+    )
+    envelope_metrics[3].metric(
+        "Mean available control authority",
+        f"{100.0 * float(np.mean(data['available_control_authority'])):.1f}%",
+    )
+
+    envelope_figure = go.Figure()
+    feasible = envelope["feasible"]
+    if np.any(feasible):
+        corridor_tilt = envelope["tilt_deg"][feasible]
+        minimum_speed = envelope["minimum_speed_mps"][feasible]
+        maximum_speed = envelope["maximum_speed_mps"][feasible]
+        envelope_figure.add_trace(go.Scatter(
+            x=np.concatenate([corridor_tilt, corridor_tilt[::-1]]),
+            y=np.concatenate([maximum_speed, minimum_speed[::-1]]),
+            fill="toself",
+            fillcolor="rgba(52, 152, 219, 0.16)",
+            line=dict(color="rgba(52, 152, 219, 0.25)"),
+            name="Feasible corridor",
+            hoverinfo="skip",
+        ))
+        envelope_figure.add_trace(go.Scatter(
+            x=corridor_tilt,
+            y=minimum_speed,
+            mode="lines",
+            name="Minimum speed",
+        ))
+        envelope_figure.add_trace(go.Scatter(
+            x=corridor_tilt,
+            y=maximum_speed,
+            mode="lines",
+            name="Maximum speed",
+        ))
+    envelope_figure.add_trace(go.Scatter(
+        x=data["tilt"],
+        y=data["transition_airspeed"],
+        mode="lines",
+        name="Observed flight",
+        line=dict(color="darkorange", width=2),
+    ))
+    envelope_figure.update_layout(
+        xaxis_title="Nacelle tilt (deg)",
+        yaxis_title="Airspeed (m/s)",
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=420,
+    )
+    st.plotly_chart(
+        envelope_figure,
+        width="stretch",
+        alt="Observed transition against the feasible airspeed and nacelle-tilt corridor",
+    )
+
+    protection_frame = pd.DataFrame({
+        "time_s": data["t"],
+        "Requested tilt (deg)": data["requested_tilt"] * 180.0 / np.pi,
+        "Protected tilt target (deg)": data["protected_tilt"] * 180.0 / np.pi,
+        "Actual tilt (deg)": data["tilt"],
+        "Available control authority (%)": 100.0 * data["available_control_authority"],
+    })
+    st.line_chart(
+        protection_frame,
+        x="time_s",
+        y=[
+            "Requested tilt (deg)",
+            "Protected tilt target (deg)",
+            "Actual tilt (deg)",
+            "Available control authority (%)",
+        ],
+        alt="Requested, protected, and actual nacelle tilt with estimated control authority",
+    )
+    reason_series = pd.Series(data["envelope_reasons"])
+    reason_counts = (
+        reason_series[reason_series != ""]
+        .str.split(", ")
+        .explode()
+        .value_counts()
+        .rename_axis("Protection reason")
+        .reset_index(name="Time steps")
+    )
+    if reason_counts.empty:
+        st.info("No Phase 7 envelope-protection limit was triggered in this simulation.")
+    else:
+        st.dataframe(
+            reason_counts,
+            hide_index=True,
+            alt="Counts of each envelope-protection reason during the simulation",
+        )
+    st.caption(
+        f"Protection limits: α ≤ {max_alpha_deg:.1f}°, pitch ≤ {max_pitch_deg:.1f}°, "
+        f"body rates ≤ {max_body_rate_deg_s:.0f}°/s, and a {speed_margin_mps:.1f} m/s "
+        "margin around the quasi-steady corridor. These are simulation safeguards, not certification."
+    )
+
+with monte_carlo_tab:
+    st.caption(
+        "Each trial runs the configured mission with a reproducible Dryden-like gust and, "
+        "according to the selected probability, one degraded actuator."
+    )
+    if st.button(
+        "Run Monte Carlo validation",
+        key="run_phase7_monte_carlo",
+        type="primary",
+        icon=":material/science:",
+    ):
+        validator = MonteCarloValidator(
+            trials=int(monte_carlo_trials),
+            seed=int(monte_carlo_seed),
+            gust_sigma_max_mps=(
+                monte_carlo_gust_sigma,
+                monte_carlo_gust_sigma,
+                monte_carlo_gust_sigma * 0.6,
+            ),
+            failure_probability=monte_carlo_failure_probability,
+            failure_time_range_s=(5.0, 45.0),
+        )
+
+        def simulate_monte_carlo_trial(scenario):
+            trial_parameters = dict(simulation_parameters)
+            trial_parameters.update({
+                "gust_enabled": True,
+                "gust_model": "Dryden turbulence",
+                "gust_start": 0.0,
+                "gust_duration": 63.0,
+                "gust_mag": 0.0,
+                "gust_dir": "Dryden turbulence",
+                "dryden_sigma_mps": scenario.gust_sigma_mps,
+                "dryden_seed": scenario.seed,
+                "actuator_failure": scenario.actuator_failure,
+            })
+            trial_data, trial_info = run_simulation(**trial_parameters)
+            mission_completed = (
+                trial_info["termination_reason"] == "Mission duration completed"
+                and not (
+                    flight_plan == "Waypoint route"
+                    and mission_mode == "AUTO"
+                    and not trial_info["mission_complete"]
+                )
+            )
+            return {
+                "completed": mission_completed,
+                "max_abs_pitch_rad": float(np.deg2rad(np.max(np.abs(trial_data["pitch"])))),
+                "max_abs_alpha_rad": float(np.max(np.abs(trial_data["transition_alpha_rad"]))),
+                "min_altitude_m": float(np.min(trial_data["alt"])),
+                "max_allocation_residual": float(np.max(trial_data["allocation_residual"])),
+            }
+
+        with st.spinner(f"Running {int(monte_carlo_trials)} seeded simulation trials..."):
+            st.session_state["phase7_monte_carlo_report"] = validator.run(
+                simulate_monte_carlo_trial
+            )
+
+    monte_carlo_report = st.session_state.get("phase7_monte_carlo_report")
+    if monte_carlo_report is None:
+        st.info("Run validation to evaluate gust and actuator-failure scenarios.")
+    else:
+        failed_trials = [trial for trial in monte_carlo_report.trials if not trial.passed]
+        mc_metrics = st.columns(3)
+        mc_metrics[0].metric("Pass rate", f"{100.0 * monte_carlo_report.success_rate:.1f}%")
+        mc_metrics[1].metric("Passed trials", f"{len(monte_carlo_report.trials) - len(failed_trials)}")
+        mc_metrics[2].metric("Failed trials", str(len(failed_trials)))
+
+        trial_rows = []
+        for trial in monte_carlo_report.trials:
+            metrics = trial.metrics
+            failure = trial.scenario.actuator_failure
+            trial_rows.append({
+                "Trial": trial.scenario.trial_index + 1,
+                "Seed": trial.scenario.seed,
+                "Gust σ (N/E/D, m/s)": " / ".join(
+                    f"{value:.2f}" for value in trial.scenario.gust_sigma_mps
+                ),
+                "Failed actuator": failure.channel if failure is not None else "None",
+                "Effectiveness left": (
+                    f"{100.0 * failure.remaining_effectiveness:.0f}%"
+                    if failure is not None else "—"
+                ),
+                "Completed": metrics["completed"],
+                "Peak |pitch| (deg)": np.rad2deg(metrics["max_abs_pitch_rad"]),
+                "Peak |α| (deg)": np.rad2deg(metrics["max_abs_alpha_rad"]),
+                "Minimum altitude (m)": metrics["min_altitude_m"],
+                "Result": "PASS" if trial.passed else "FAIL",
+                "Failure reasons": ", ".join(trial.failure_reasons),
+            })
+        trial_frame = pd.DataFrame(trial_rows)
+        st.dataframe(
+            trial_frame,
+            hide_index=True,
+            alt="Per-trial Monte Carlo gust, actuator-failure, and safety results",
+        )
+
+        pitch_chart_col, alpha_chart_col = st.columns(2)
+        pitch_chart_col.plotly_chart(
+            go.Figure(go.Histogram(
+                x=trial_frame["Peak |pitch| (deg)"],
+                name="Peak pitch",
+                nbinsx=12,
+            )),
+            width="stretch",
+            alt="Distribution of peak absolute pitch across Monte Carlo trials",
+        )
+        alpha_chart_col.plotly_chart(
+            go.Figure(go.Histogram(
+                x=trial_frame["Peak |α| (deg)"],
+                name="Peak angle of attack",
+                nbinsx=12,
+            )),
+            width="stretch",
+            alt="Distribution of peak absolute angle of attack across Monte Carlo trials",
+        )
+        st.caption(
+            f"Seed {monte_carlo_report.seed}; safety limits are |pitch| ≤ 60°, "
+            "|α| ≤ 25°, minimum altitude ≥ 0 m, and mission completion. "
+            "This Monte Carlo batch is a model validation aid, not flight certification."
+        )
 
 # ==========================================================
 # 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
