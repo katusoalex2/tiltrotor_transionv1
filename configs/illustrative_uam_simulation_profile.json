@@ -1,0 +1,353 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "id": "illustrative-four-rotor-tiltrotor-simulation",
+    "name": "Illustrative Four-Rotor Tiltrotor (Simulation Only)",
+    "revision": 1,
+    "vehicle_class": "UAM concept demonstrator",
+    "description": "Synthetic 5 kg-class simulator example based on this project's existing profile and dashboard defaults. Not measured or representative of a production UAM aircraft."
+  },
+  "aircraft": {
+    "architecture": "tiltrotor",
+    "mass_properties": {
+      "component_masses_kg": {
+        "fuselage": 3.0,
+        "wing": 1.0,
+        "vtail": 0.5,
+        "motor": 0.125
+      },
+      "center_of_gravity_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "inertia_tensor_kg_m2": [
+        [
+          0.15,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.25,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.4
+        ]
+      ]
+    },
+    "geometry": {
+      "fuselage": {
+        "length_m": 1.6,
+        "width_m": 0.12,
+        "height_m": 0.14
+      },
+      "tilt_axis_xz_m": [
+        0.1,
+        0.0
+      ],
+      "wing": {
+        "root_le_x_m": 0.1,
+        "root_y_m": 0.0,
+        "tip_le_x_m": 0.05,
+        "tip_y_m": 1.0,
+        "root_chord_m": 0.4,
+        "tip_chord_m": 0.2,
+        "sweep_deg": 0.0
+      },
+      "rotors": [
+        {
+          "id": "front_left",
+          "position_m": [
+            0.3,
+            0.4,
+            0.0
+          ],
+          "tilt_enabled": true
+        },
+        {
+          "id": "front_right",
+          "position_m": [
+            0.3,
+            -0.4,
+            0.0
+          ],
+          "tilt_enabled": true
+        },
+        {
+          "id": "rear_left",
+          "position_m": [
+            -0.3,
+            0.4,
+            0.0
+          ],
+          "tilt_enabled": false
+        },
+        {
+          "id": "rear_right",
+          "position_m": [
+            -0.3,
+            -0.4,
+            0.0
+          ],
+          "tilt_enabled": false
+        }
+      ],
+      "vtail": {
+        "root_x_m": -0.6,
+        "tip_x_m": -0.5,
+        "tip_y_m": 0.3,
+        "tip_z_m": -0.15,
+        "area_m2": 0.1,
+        "arm_m": 0.5
+      }
+    },
+    "propulsion": {
+      "battery": {
+        "cells": 6,
+        "capacity_mah": 5000,
+        "c_rating": 30,
+        "nominal_voltage_v": 22.2
+      },
+      "motor": {
+        "kv_rpm_per_volt": 920,
+        "maximum_rpm": 3000,
+        "mass_kg": 0.125,
+        "resistance_ohm": null,
+        "inductance_h": null
+      },
+      "propeller": {
+        "diameter_in": 12.0,
+        "pitch_in": 5.5,
+        "blade_count": 2,
+        "thrust_coefficient_n_s2_rad2": 1e-5,
+        "torque_coefficient_nm_s2_rad2": null
+      },
+      "motor_dynamics": {
+        "time_constant_s": null,
+        "slew_rate_rpm_s": null
+      },
+      "rotors": {
+        "count": 4,
+        "thrust_model": "quadratic",
+        "ground_effect_model": "enabled"
+      }
+    },
+    "aerodynamics": {
+      "reference_area_m2": 0.6,
+      "aspect_ratio": 5.0,
+      "zero_lift_drag_coefficient": 0.02,
+      "lift_curve_slope_per_rad": 4.0,
+      "stall_angle_deg": 15.0,
+      "airfoil_data_file": null
+    },
+    "actuators": {
+      "tilt": {
+        "maximum_rate_deg_s": 30.0,
+        "angle_limits_deg": [
+          0.0,
+          90.0
+        ],
+        "feedback_sensor": null
+      },
+      "control_surfaces": [
+        {
+          "id": "left_tail",
+          "type": "vtail",
+          "maximum_deflection_deg": 11.5,
+          "rate_limit_deg_s": 300.0,
+          "fail_position_deg": 0.0
+        },
+        {
+          "id": "right_tail",
+          "type": "vtail",
+          "maximum_deflection_deg": 11.5,
+          "rate_limit_deg_s": 300.0,
+          "fail_position_deg": 0.0
+        }
+      ]
+    },
+    "sensors": {
+      "imu": {
+        "model": "unspecified illustrative sensor",
+        "update_rate_hz": null,
+        "noise_density": null,
+        "bias_stability": null
+      },
+      "air_data": {
+        "model": "simulated",
+        "update_rate_hz": null,
+        "calibrated_airspeed_source": "simulated"
+      },
+      "gnss": {
+        "model": "simulated",
+        "update_rate_hz": null,
+        "accuracy_m": null
+      }
+    },
+    "control": {
+      "altitude_pid": {
+        "kp": 1.5,
+        "ki": 0.05,
+        "kd": 0.1
+      },
+      "speed_pid": {
+        "kp": 0.1,
+        "ki": 0.0,
+        "kd": 0.01
+      },
+      "attitude_pid": {
+        "kp": 1.0,
+        "ki": 0.0,
+        "kd": 0.05
+      },
+      "rate_pid": {
+        "kp": 0.5,
+        "ki": 0.0,
+        "kd": 0.01
+      },
+      "hover_rate_scale": 1.5,
+      "cruise_rate_scale": 0.75,
+      "allocation": {
+        "method": "bounded_least_squares",
+        "effectiveness_data_source": "simulated",
+        "actuator_order": [
+          "front_left",
+          "front_right",
+          "rear_left",
+          "rear_right",
+          "left_tail",
+          "right_tail"
+        ]
+      }
+    },
+    "transition": {
+      "max_tilt_rate_deg_s": 30.0,
+      "observer_time_constant_s": 0.25,
+      "max_alpha_deg": 15.0,
+      "max_pitch_deg": 60.0,
+      "max_body_rate_deg_s": 180.0,
+      "speed_margin_mps": 0.5,
+      "envelope": {
+        "airspeed_tilt_points": [],
+        "source": "illustrative_simulation_estimate"
+      }
+    },
+    "disturbance": {
+      "enabled": true,
+      "model": "Finite-duration gust",
+      "start_s": 5.0,
+      "duration_s": 2.0,
+      "magnitude_mps": 6.0,
+      "direction": "Front",
+      "dryden_sigma_mps": 2.5,
+      "dryden_tau_s": 1.0
+    },
+    "environment": {
+      "air_density_kg_m3": 1.225,
+      "gravity_m_s2": 9.81
+    },
+    "failures": {
+      "supported_actuator_faults": [
+        "rotor_effectiveness",
+        "tilt_actuator",
+        "control_surface"
+      ],
+      "sensor_faults": []
+    }
+  },
+  "hardware": {
+    "autopilot": "PX4",
+    "protocol": "MAVLink",
+    "execution_mode": "simulation",
+    "endpoint": "not_configured",
+    "actuator_outputs_enabled": false
+  },
+  "traceability": {
+    "data_status": "synthetic_unvalidated",
+    "intended_use": [
+      "Upload to the dashboard",
+      "Inspect the 3D aircraft profile",
+      "Exercise simulator and analysis views"
+    ],
+    "not_for": [
+      "Aircraft design approval",
+      "Real flight or flight-control tuning",
+      "Hardware actuator commands",
+      "Safety or certification claims"
+    ],
+    "basis": "Illustrative values aligned to the repository's existing four-rotor simulator profile and dashboard defaults. No values are sourced from a real aircraft, manufacturer data, wind-tunnel test, or flight test.",
+    "parameter_group_records": [
+      {
+        "json_path": "aircraft.mass_properties",
+        "source": "Synthetic example aligned to the simulator's nominal 5 kg total mass",
+        "status": "assumed_not_measured",
+        "uncertainty": "Not quantified; replace with weighed component masses, measured CG, and a validated inertia tensor."
+      },
+      {
+        "json_path": "aircraft.geometry",
+        "source": "Synthetic four-rotor layout based on the project's existing profile template",
+        "status": "assumed_not_measured",
+        "uncertainty": "Not quantified; replace with as-built dimensions and rotor coordinates."
+      },
+      {
+        "json_path": "aircraft.propulsion",
+        "source": "Illustrative values aligned to the project's dashboard motor and propeller defaults",
+        "status": "assumed_not_measured",
+        "uncertainty": "Not quantified; null motor electrical and actuator-dynamic properties are intentionally unspecified."
+      },
+      {
+        "json_path": "aircraft.aerodynamics",
+        "source": "Simplified simulator coefficients from the project profile template",
+        "status": "assumed_not_measured",
+        "uncertainty": "Not quantified; not measured aerodynamic polars."
+      },
+      {
+        "json_path": "aircraft.actuators",
+        "source": "Illustrative simulator limits from the project profile template",
+        "status": "assumed_not_measured",
+        "uncertainty": "Not quantified; replace with measured actuator rate, travel, latency, and failure data."
+      },
+      {
+        "json_path": "aircraft.sensors",
+        "source": "Simulation placeholders",
+        "status": "unspecified",
+        "uncertainty": "Sensor noise, bias, update rate, and latency are not modeled from hardware data."
+      },
+      {
+        "json_path": "control",
+        "source": "Existing dashboard example gains",
+        "status": "simulation_defaults_not_tuned_for_aircraft",
+        "uncertainty": "No aircraft-specific stability or robustness validation."
+      },
+      {
+        "json_path": "transition",
+        "source": "Existing dashboard example limits",
+        "status": "illustrative_not_validated",
+        "uncertainty": "Not a certified or demonstrated transition envelope."
+      },
+      {
+        "json_path": "disturbance",
+        "source": "Existing simulator gust scenario",
+        "status": "test_scenario_not_weather_limit",
+        "uncertainty": "The selected gust is one bounded simulation case, not a guarantee against arbitrary gusts."
+      }
+    ],
+    "simulator_limitations": [
+      "The current simulator supports a four-rotor tiltrotor architecture only.",
+      "Several profile sections are metadata and may not yet be consumed by the physics model.",
+      "Aerodynamic profile values do not replace measured coefficient tables in the current model.",
+      "Hardware actuator outputs are disabled."
+    ],
+    "revision_history": [
+      {
+        "revision": 1,
+        "change": "Created a synthetic uploadable baseline for dashboard and simulator exploration."
+      }
+    ]
+  },
+  "extensions": {}
+}

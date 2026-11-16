@@ -49,6 +49,10 @@ from src.configuration.aircraft_profile import (
     serialize_aircraft_profile,
     simulation_compatibility_issues,
 )
+from src.configuration.aircraft_profile_excel import (
+    load_aircraft_profile_excel,
+    serialize_aircraft_profile_excel,
+)
 from src.configuration.aircraft_profile_preview import build_aircraft_profile_figure
 from src.wind.gust import DiscreteGust as FiniteDurationGust, DrydenGust
 from src.simulation.failures import ACTUATOR_CHANNELS
@@ -64,8 +68,8 @@ profile_template_path = os.path.join(base_dir, "configs", "uam_profile_template.
 with open(profile_template_path, "rb") as profile_file:
     template_profile_bytes = profile_file.read()
 uploaded_profile = st.sidebar.file_uploader(
-    "Load versioned aircraft profile (YAML/JSON)",
-    type=["yaml", "yml", "json"],
+    "Load versioned aircraft profile (YAML/JSON/Excel)",
+    type=["yaml", "yml", "json", "xlsx"],
     key="aircraft_profile_upload",
 )
 if uploaded_profile is not None:
@@ -80,7 +84,10 @@ if st.session_state.get("_cached_aircraft_profile_fingerprint") == profile_finge
     active_profile = st.session_state["_cached_aircraft_profile"]
 else:
     try:
-        active_profile = load_aircraft_profile(profile_bytes, profile_filename)
+        if profile_filename.lower().endswith(".xlsx"):
+            active_profile = load_aircraft_profile_excel(profile_bytes)
+        else:
+            active_profile = load_aircraft_profile(profile_bytes, profile_filename)
     except (TypeError, ValueError) as exc:
         st.sidebar.error(f"Aircraft profile was not loaded: {exc}")
         st.stop()
@@ -452,11 +459,22 @@ dashboard_values_fingerprint = hashlib.sha256(
 with st.sidebar.expander("Aircraft profile export"):
     st.caption(
         "Profiles preserve custom aircraft, sensor, actuator, control, and hardware fields. "
+        "Upload or download JSON, YAML, and the editable multi-sheet Excel workbook. "
         "Only the four-rotor tiltrotor subset is currently simulated."
     )
-    if st.button("Prepare current profile for download", key="prepare_aircraft_profile"):
+    if st.button("Prepare current profile exports", key="prepare_aircraft_profile"):
         st.session_state["aircraft_profile_download_bytes"] = serialize_aircraft_profile(
             export_profile
+        )
+        st.session_state["aircraft_profile_excel_download_bytes"] = (
+            serialize_aircraft_profile_excel(export_profile)
+        )
+        template_profile = load_aircraft_profile(
+            template_profile_bytes,
+            "uam_profile_template.yaml",
+        )
+        st.session_state["aircraft_profile_template_excel_bytes"] = (
+            serialize_aircraft_profile_excel(template_profile)
         )
         st.session_state["aircraft_profile_download_fingerprint"] = (
             dashboard_values_fingerprint
@@ -472,8 +490,23 @@ with st.sidebar.expander("Aircraft profile export"):
             mime="application/json",
             key="download_active_aircraft_profile",
         )
+        st.download_button(
+            "Download active profile (Excel)",
+            data=st.session_state["aircraft_profile_excel_download_bytes"],
+            file_name="aircraft_profile.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_active_aircraft_profile_excel",
+        )
     else:
-        st.info("Prepare a fresh download after changing aircraft parameters.")
+        st.info("Prepare fresh exports after changing aircraft parameters.")
+    if "aircraft_profile_template_excel_bytes" in st.session_state:
+        st.download_button(
+            "Download editable profile template (Excel)",
+            data=st.session_state["aircraft_profile_template_excel_bytes"],
+            file_name="uam_aircraft_profile_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_aircraft_profile_template_excel",
+        )
     st.download_button(
         "Download editable profile template (YAML)",
         data=template_profile_bytes,
@@ -1036,14 +1069,21 @@ st.markdown("---")
 
 fig, axes = plt.subplots(4, 2, figsize=(16, 18))
 
-# Phase boundaries for visualization
+# Show only the timed AUTO transition segment in the eight mission plots.
 mission = MissionProfile()
-phase_colors = ['#B0E0E6', '#FFB6C1', '#FFD700']
+transition_start_s = mission.hover_time
+transition_end_s = mission.total_time
+show_transition_window = flight_plan == "Timed transition" and mission_mode == "AUTO"
+transition_times = np.asarray(data["t"], dtype=float)[
+    np.asarray(data["phase"]) == "TRANSITION"
+]
+if show_transition_window and transition_times.size:
+    transition_start_s = float(transition_times[0])
+    transition_end_s = min(mission.total_time, float(data["t"][-1]))
+phase_colors = ["#FFB6C1"]
 mission_phases = (
-    [("HOVER", 0.0, mission.hover_time),
-     ("TRANSITION", mission.hover_time, mission.transition_duration),
-     ("CRUISE", mission.total_time, 63.0 - mission.total_time)]
-    if flight_plan == "Timed transition" and mission_mode == "AUTO"
+    [("TRANSITION", transition_start_s, transition_end_s - transition_start_s)]
+    if show_transition_window and transition_times.size
     else []
 )
 
@@ -1055,8 +1095,10 @@ def add_phase_background(ax):
 axes[0, 0].plot(data["t"], data["alt"], 'b-', linewidth=2, label="Altitude")
 axes[0, 0].plot(data["t"], data["ref_alt"], 'k--', linewidth=1.5, label="Reference")
 add_phase_background(axes[0, 0])
-axes[0, 0].set_title("Altitude (Full Mission)")
-axes[0, 0].set_ylabel("m")
+axes[0, 0].set_title(
+    "Altitude (Transition)" if show_transition_window else "Altitude (Mission)"
+)
+axes[0, 0].set_ylabel("Altitude (m, positive up)")
 axes[0, 0].grid(True)
 axes[0, 0].legend()
 
@@ -1065,7 +1107,7 @@ axes[0, 1].plot(data["t"], data["pitch"], 'r-', linewidth=2, label="Actual")
 axes[0, 1].plot(data["t"], data["desired_pitch"], 'k--', linewidth=1.5, label="Desired")
 add_phase_background(axes[0, 1])
 axes[0, 1].set_title("Pitch")
-axes[0, 1].set_ylabel("deg")
+axes[0, 1].set_ylabel("Pitch angle (deg)")
 axes[0, 1].grid(True)
 axes[0, 1].legend()
 
@@ -1074,7 +1116,7 @@ axes[1, 0].plot(data["t"], data["roll"], 'orange', linewidth=2)
 add_phase_background(axes[1, 0])
 axes[1, 0].axhline(0, color='k', linestyle='--')
 axes[1, 0].set_title("Roll")
-axes[1, 0].set_ylabel("deg")
+axes[1, 0].set_ylabel("Roll angle (deg)")
 axes[1, 0].grid(True)
 
 # 4. Yaw
@@ -1082,46 +1124,81 @@ axes[1, 1].plot(data["t"], data["yaw"], 'purple', linewidth=2)
 add_phase_background(axes[1, 1])
 axes[1, 1].axhline(0, color='k', linestyle='--')
 axes[1, 1].set_title("Yaw")
-axes[1, 1].set_ylabel("deg")
+axes[1, 1].set_ylabel("Yaw angle (deg)")
 axes[1, 1].grid(True)
 
 # 5. Wind
 axes[2, 0].plot(data["t"], data["wind"], 'g-', linewidth=2)
 add_phase_background(axes[2, 0])
-axes[2, 0].set_title("Wind Gust")
-axes[2, 0].set_ylabel("m/s")
+axes[2, 0].set_title("Wind Speed")
+axes[2, 0].set_ylabel("Wind magnitude (m/s)")
 axes[2, 0].grid(True)
 
 # 6. Rotor Tilt
 axes[2, 1].plot(data["t"], data["tilt"], 'm-', linewidth=2)
 add_phase_background(axes[2, 1])
 axes[2, 1].set_title("Rotor Tilt (Mission)")
-axes[2, 1].set_ylabel("deg")
+axes[2, 1].set_ylabel("Nacelle tilt (deg)")
 axes[2, 1].grid(True)
 
 # 7. L/D Ratio
 axes[3, 0].plot(data["t"], data["ld_ratio"], 'teal', linewidth=2)
 add_phase_background(axes[3, 0])
 axes[3, 0].set_title("L/D Ratio")
-axes[3, 0].set_ylabel("L/D")
+axes[3, 0].set_ylabel("Lift-to-drag ratio (dimensionless)")
 axes[3, 0].grid(True)
 
-# 8. Battery Current
-axes[3, 1].plot(data["t"], data["current"], 'b-', linewidth=2, label="Current (A)")
-axes[3, 1].axhline(y=(battery_mah/1000)*battery_c_rating, color='r', linestyle='--', label="Max C-Rating")
+# 8. Motor-speed/KV proxy
+axes[3, 1].plot(data["t"], data["current"], 'b-', linewidth=2)
 add_phase_background(axes[3, 1])
-axes[3, 1].set_title("Battery Current Draw")
-axes[3, 1].set_ylabel("Amps")
+axes[3, 1].set_title("Motor-Speed/KV Proxy (not electrical current)")
+axes[3, 1].set_ylabel("Motor-speed/KV proxy (model units)")
 axes[3, 1].grid(True)
-axes[3, 1].legend(loc='upper left')
 
-# Add phase labels to the top
+# Every panel uses mission time; timed AUTO plots are clipped to transition.
+for ax in axes.flat:
+    ax.set_xlabel("Mission time (s)")
+    if show_transition_window:
+        ax.set_xlim(transition_start_s, transition_end_s)
+
+# Mark the transition boundary on the top row.
 for ax in axes[0, :]:
-    for name, start, dur, *_ in mission_phases:
-        ax.axvline(start, color='gray', linestyle=':', alpha=0.5)
+    if show_transition_window:
+        for boundary in (transition_start_s, transition_end_s):
+            ax.axvline(boundary, color='gray', linestyle=':', alpha=0.5)
 
 plt.tight_layout()
-st.pyplot(fig, alt="Full-flight altitude, attitude, wind, rotor tilt, efficiency, and battery telemetry")
+st.pyplot(
+    fig,
+    alt=(
+        "Transition altitude, attitude, wind, rotor tilt, lift-to-drag ratio, and "
+        "motor-speed/KV proxy"
+        if show_transition_window
+        else "Mission altitude, attitude, wind, rotor tilt, lift-to-drag ratio, and "
+        "motor-speed/KV proxy"
+    ),
+)
+if show_transition_window:
+    if transition_times.size:
+        completion_note = (
+            f" The simulation ended before the planned transition completion at "
+            f"{mission.total_time:.1f} s."
+            if transition_end_s < mission.total_time
+            else ""
+        )
+        st.caption(
+            f"Showing recorded transition data only: {transition_start_s:.1f}–"
+            f"{transition_end_s:.1f} s.{completion_note}"
+        )
+    else:
+        st.caption(
+            f"No transition samples were recorded. Showing the planned transition "
+            f"window: {mission.hover_time:.1f}–{mission.total_time:.1f} s."
+        )
+st.caption(
+    "The plotted motor-speed/KV value is a proxy, not an electrical current estimate; "
+    "the model does not include motor resistance or battery current dynamics."
+)
 
 st.markdown("---")
 st.subheader("6-DOF equations and response")
@@ -1158,6 +1235,8 @@ with kinematics_tab:
         position_data,
         x="time_s",
         y=["North (m)", "East (m)", "Down (m)"],
+        x_label="Time (s)",
+        y_label="NED position (m)",
         alt="Integrated north, east, and down position in the NED frame",
     )
     velocity_data = pd.DataFrame({
@@ -1170,6 +1249,8 @@ with kinematics_tab:
         velocity_data,
         x="time_s",
         y=["North (m/s)", "East (m/s)", "Down (m/s)"],
+        x_label="Time (s)",
+        y_label="NED velocity (m/s)",
         alt="Integrated north, east, and down velocity in the NED frame",
     )
 
@@ -1185,6 +1266,8 @@ with force_tab:
         force_data,
         x="time_s",
         y=["Forward X (N)", "Right Y (N)", "Down Z (N)"],
+        x_label="Time (s)",
+        y_label="Body force (N)",
         alt="Resultant rotor and aerodynamic force resolved in the FRD body frame",
     )
     acceleration_data = pd.DataFrame({
@@ -1197,6 +1280,8 @@ with force_tab:
         acceleration_data,
         x="time_s",
         y=["North (m/s²)", "East (m/s²)", "Down (m/s²)"],
+        x_label="Time (s)",
+        y_label="NED acceleration (m/s²)",
         alt="NED acceleration from body force, attitude transformation, and gravity",
     )
 
@@ -1212,6 +1297,8 @@ with moment_tab:
         rate_data,
         x="time_s",
         y=["p (rad/s)", "q (rad/s)", "r (rad/s)"],
+        x_label="Time (s)",
+        y_label="Body angular rate (rad/s)",
         alt="Body roll, pitch, and yaw rates p, q, and r",
     )
     moment_data = pd.DataFrame({
@@ -1224,6 +1311,8 @@ with moment_tab:
         moment_data,
         x="time_s",
         y=["Roll L (N·m)", "Pitch M (N·m)", "Yaw N (N·m)"],
+        x_label="Time (s)",
+        y_label="Body moment (N·m)",
         alt="Applied roll, pitch, and yaw moments in the FRD body frame",
     )
     angular_acceleration_data = pd.DataFrame({
@@ -1236,6 +1325,8 @@ with moment_tab:
         angular_acceleration_data,
         x="time_s",
         y=["p-dot (rad/s²)", "q-dot (rad/s²)", "r-dot (rad/s²)"],
+        x_label="Time (s)",
+        y_label="Body angular acceleration (rad/s²)",
         alt="Angular acceleration produced by applied moments and Euler gyroscopic coupling",
     )
 
@@ -1264,18 +1355,22 @@ with tracking_col:
         altitude_data,
         x="time_s",
         y=["Altitude (m)", "Altitude target (m)"],
+        x_label="Time (s)",
+        y_label="Altitude (m, positive up)",
         alt="Aircraft altitude compared with the mission altitude target",
     )
     speed_data = pd.DataFrame({
         "time_s": data["t"],
-        "North velocity (m/s)": data["speed"],
-        "North velocity target (m/s)": data["ref_speed"],
+        "Horizontal airspeed (m/s)": data["airspeed_mps"],
+        "Target speed (m/s)": data["ref_speed"],
     })
     st.line_chart(
         speed_data,
         x="time_s",
-        y=["North velocity (m/s)", "North velocity target (m/s)"],
-        alt="Northward ground velocity compared with the mission velocity target",
+        y=["Horizontal airspeed (m/s)", "Target speed (m/s)"],
+        x_label="Time (s)",
+        y_label="Horizontal airspeed / target speed (m/s)",
+        alt="Horizontal airspeed compared with the mission speed target",
     )
 
 with mission_col:
@@ -1297,6 +1392,8 @@ with mission_col:
             x="North (m)",
             y="East (m)",
             color="Time (s)",
+            x_label="North position (m)",
+            y_label="East position (m)",
             alt="Aircraft position through the local north-east flight path",
         )
     else:
@@ -1318,22 +1415,32 @@ with tilt_col:
         tilt_data,
         x="time_s",
         y=["Actual tilt (deg)", "Tilt command (deg)"],
+        x_label="Time (s)",
+        y_label="Nacelle tilt (deg)",
         alt="Actual nacelle tilt tracking its commanded angle",
     )
 
 with motor_col:
     st.markdown("**Per-motor command (RPM)**")
+    rad_s_to_rpm = 60.0 / (2.0 * np.pi)
     motor_data = pd.DataFrame({
         "time_s": data["t"],
-        "Front left": data["omega_fl"],
-        "Front right": data["omega_fr"],
-        "Rear left": data["omega_rl"],
-        "Rear right": data["omega_rr"],
+        "Front left (RPM)": data["omega_fl"] * rad_s_to_rpm,
+        "Front right (RPM)": data["omega_fr"] * rad_s_to_rpm,
+        "Rear left (RPM)": data["omega_rl"] * rad_s_to_rpm,
+        "Rear right (RPM)": data["omega_rr"] * rad_s_to_rpm,
     })
     st.line_chart(
         motor_data,
         x="time_s",
-        y=["Front left", "Front right", "Rear left", "Rear right"],
+        y=[
+            "Front left (RPM)",
+            "Front right (RPM)",
+            "Rear left (RPM)",
+            "Rear right (RPM)",
+        ],
+        x_label="Time (s)",
+        y_label="Motor speed (RPM)",
         alt="Commanded RPM for each of the four motors",
     )
 
@@ -1348,6 +1455,8 @@ with surface_col:
         surface_data,
         x="time_s",
         y=["Left surface", "Right surface"],
+        x_label="Time (s)",
+        y_label="V-tail deflection (deg)",
         alt="Left and right V-tail control surface commands",
     )
     
@@ -1384,7 +1493,7 @@ with c1:
     ax_wt.axhline(0, color='k', linestyle='--', alpha=0.3)
     ax_wt.axvline(0, color='k', linestyle='--', alpha=0.3)
     ax_wt.set_xlabel("Forward velocity u (m/s)")
-    ax_wt.set_ylabel("Downward velocity w (m/s)")
+    ax_wt.set_ylabel("Vertical component −w (m/s; up positive)")
     ax_wt.set_title(f"Airspeed Vector in Body Frame\n(α = {np.rad2deg(np.arctan2(w_airspeed, u_airspeed)):.1f}°)")
     ax_wt.grid(True)
     ax_wt.legend()
@@ -1399,7 +1508,7 @@ with c2:
     ax_alpha.plot(data["t"], alpha_history, 'b-', linewidth=2)
     ax_alpha.axhline(15, color='r', linestyle='--', alpha=0.5, label="Stall angle (15°)")
     ax_alpha.axhline(-15, color='r', linestyle='--', alpha=0.5)
-    ax_alpha.set_xlabel("Time (s)")
+    ax_alpha.set_xlabel("Mission time (s)")
     ax_alpha.set_ylabel("Angle of Attack α (deg)")
     ax_alpha.set_title("Angle of Attack during Flight")
     ax_alpha.grid(True)
@@ -1447,19 +1556,30 @@ with col_geo1:
     fig_side, ax_side = plt.subplots(figsize=(8, 4))
     ax_side.axhline(0, color='brown', linestyle='--', linewidth=1, alpha=0.5)
     for pos in motor_positions:
-        ax_side.plot(pos[0], -pos[2], 'ko', markersize=10)
+        ax_side.plot(pos[0], pos[2], 'ko', markersize=10)
     
     # Plot CG, Wing AC, and Neutral Point
-    ax_side.plot(props.cg[0], -props.cg[2], 'bo', markersize=12, label="CG")
-    ax_side.plot(props.ac_wing_x, -props.ac_z, 'go', markersize=10, label="Wing AC")
-    ax_side.plot(props.neutral_point_x, -props.ac_z, 'r', marker='X', markersize=12, label="Neutral Point")
+    ax_side.plot(props.cg[0], props.cg[2], 'bo', markersize=12, label="CG")
+    ax_side.plot(props.ac_wing_x, props.ac_z, 'go', markersize=10, label="Wing AC")
+    ax_side.plot(props.neutral_point_x, props.ac_z, 'r', marker='X', markersize=12, label="Neutral Point")
     
     # Plot Wing and Tail
     ax_side.plot([props.le_root_x, props.le_root_x + props.root_chord], [0, 0], 'k-', linewidth=4, label="Wing (Root)")
-    ax_side.plot([-props.cg[0] - props.vtail_arm, -props.cg[0] - props.vtail_arm], [0, -0.2], 'purple', linewidth=4, label="V-Tail")
+    ax_side.plot(
+        [-props.cg[0] - props.vtail_arm, -props.cg[0] - props.vtail_arm],
+        [0, 0.2],
+        'purple',
+        linewidth=4,
+        label="V-Tail",
+    )
     
     ax_side.set_xlim(-1.0, 1.0); ax_side.set_ylim(-0.5, 0.5)
-    ax_side.invert_yaxis(); ax_side.set_title("Side Profile: Neutral Point & AC"); ax_side.grid(True, alpha=0.3); ax_side.legend()
+    ax_side.invert_yaxis()
+    ax_side.set_xlabel("Longitudinal position X (m; forward positive)")
+    ax_side.set_ylabel("Vertical position Z (m; down positive)")
+    ax_side.set_title("Side Profile: Neutral Point & AC")
+    ax_side.grid(True, alpha=0.3)
+    ax_side.legend()
     st.pyplot(fig_side, alt="Aircraft side profile showing the center of gravity, aerodynamic center, and neutral point")
 
 with col_geo2:
@@ -1471,6 +1591,9 @@ with col_geo2:
     ax_top.plot(props.cg[0], props.cg[1], 'bo', markersize=12, label="CG")
     ax_top.set_xlim(-1.0, 1.0)
     ax_top.set_ylim(-calculated_wingspan, calculated_wingspan)
+    ax_top.invert_yaxis()
+    ax_top.set_xlabel("Longitudinal position X (m; forward positive)")
+    ax_top.set_ylabel("Lateral position Y (m; right positive)")
     ax_top.set_title("Top Profile (X-Y)")
     ax_top.grid(True, alpha=0.3)
     ax_top.legend()
@@ -1479,7 +1602,7 @@ with col_geo2:
 # LIFT HANDOFF & CONTROL AUTHORITY
 # ==========================================================
 st.markdown("---")
-st.subheader("🎯 Lift Handoff & Control Authority")
+st.subheader("Lift Handoff & Control Authority")
 
 c1, c2 = st.columns(2)
 
@@ -1788,7 +1911,7 @@ with effectiveness_tab:
         automargin=True,
     )
     fig_effectiveness.update_layout(
-        xaxis_title="Standardized actuator perturbation",
+        xaxis_title="Actuator perturbation pattern",
         yaxis_title="Body moment axis",
         margin=dict(l=20, r=20, t=30, b=130),
         height=440,
@@ -2107,6 +2230,8 @@ with allocation_tab:
             "Controller tilt command (deg)",
             "Actual tilt (deg)",
         ],
+        x_label="Time (s)",
+        y_label="Nacelle tilt (deg)",
         alt="Requested, protected, and actual nacelle tilt during the mission",
     )
     allocation_frame = pd.DataFrame(
@@ -2152,6 +2277,8 @@ with rate_tab:
             "q actual (deg/s)", "q target (deg/s)",
             "r actual (deg/s)", "r target (deg/s)",
         ],
+        x_label="Time (s)",
+        y_label="Body angular rate (deg/s)",
         alt="Actual and commanded roll, pitch, and yaw rates",
     )
     st.caption(
@@ -2177,6 +2304,8 @@ with attitude_tab:
             "Pitch actual (deg)", "Pitch target (deg)",
             "Heading actual (deg)", "Heading target (deg)",
         ],
+        x_label="Time (s)",
+        y_label="Attitude angle (deg)",
         alt="Actual roll, pitch, and heading compared with guidance targets",
     )
     st.caption(
@@ -2221,17 +2350,21 @@ with guidance_tab:
             }),
             x="time_s",
             y=["Altitude (m)", "Target altitude (m)"],
+            x_label="Time (s)",
+            y_label="Altitude (m, positive up)",
             alt="Guidance altitude tracking",
         )
     with speed_tracking:
         st.line_chart(
             pd.DataFrame({
                 "time_s": data["t"],
-                "Airspeed (m/s)": data["airspeed_mps"],
+                "Horizontal airspeed (m/s)": data["airspeed_mps"],
                 "Target speed (m/s)": data["ref_speed"],
             }),
             x="time_s",
-            y=["Airspeed (m/s)", "Target speed (m/s)"],
+            y=["Horizontal airspeed (m/s)", "Target speed (m/s)"],
+            x_label="Time (s)",
+            y_label="Horizontal airspeed / target speed (m/s)",
             alt="Guidance airspeed tracking",
         )
     guidance_metrics = st.columns(3)
@@ -2256,18 +2389,33 @@ with schedule_tab:
     blend_data = pd.DataFrame({
         "time_s": data["t"],
         "Transition blend (0 hover – 1 cruise)": data["gain_blend"],
-        "Airspeed (m/s)": data["airspeed_mps"],
+        "Horizontal airspeed (m/s)": data["airspeed_mps"],
         "Nacelle tilt (deg)": data["tilt"],
     })
-    st.line_chart(
+    blend_column, airspeed_column, tilt_column = st.columns(3)
+    blend_column.line_chart(
         blend_data,
         x="time_s",
-        y=[
-            "Transition blend (0 hover – 1 cruise)",
-            "Airspeed (m/s)",
-            "Nacelle tilt (deg)",
-        ],
-        alt="Transition gain-scheduling blend with airspeed and nacelle tilt",
+        y=["Transition blend (0 hover – 1 cruise)"],
+        x_label="Time (s)",
+        y_label="Gain-schedule blend (0–1)",
+        alt="Transition gain-scheduling blend through time",
+    )
+    airspeed_column.line_chart(
+        blend_data,
+        x="time_s",
+        y=["Horizontal airspeed (m/s)"],
+        x_label="Time (s)",
+        y_label="Horizontal airspeed (m/s)",
+        alt="Airspeed through time",
+    )
+    tilt_column.line_chart(
+        blend_data,
+        x="time_s",
+        y=["Nacelle tilt (deg)"],
+        x_label="Time (s)",
+        y_label="Nacelle tilt (deg)",
+        alt="Nacelle tilt through time",
     )
     scheduled_gain_data = pd.DataFrame({
         "time_s": data["t"],
@@ -2275,12 +2423,23 @@ with schedule_tab:
         "Rate Ki": data["gain_ki"],
         "Rate Kd": data["gain_kd"],
     })
-    st.line_chart(
-        scheduled_gain_data,
-        x="time_s",
-        y=["Rate Kp", "Rate Ki", "Rate Kd"],
-        alt="Rate PID gains scheduled through transition",
-    )
+    gain_columns = st.columns(3)
+    for column, (gain_key, gain_name) in zip(
+        gain_columns,
+        (
+            ("Rate Kp", "Proportional gain Kp"),
+            ("Rate Ki", "Integral gain Ki"),
+            ("Rate Kd", "Derivative gain Kd"),
+        ),
+    ):
+        column.line_chart(
+            scheduled_gain_data,
+            x="time_s",
+            y=[gain_key],
+            x_label="Time (s)",
+            y_label=f"{gain_key} (configured units)",
+            alt=f"{gain_name} scheduled through transition",
+        )
     st.caption(
         "The schedule linearly blends hover and cruise rate gains using the mean of "
         "normalized airspeed (0–20 m/s) and nacelle tilt (0–90°). Hover and cruise "
@@ -2324,6 +2483,8 @@ with gust_tab:
             "Down gust (m/s)",
             "Wind magnitude (m/s)",
         ],
+        x_label="Time (s)",
+        y_label="Wind component or magnitude (m/s)",
         alt="North, east, down, and total gust wind applied during the simulation",
     )
     if gust_info["wind_model"] == "Dryden turbulence":
@@ -2372,6 +2533,8 @@ with observer_tab:
             "Dynamics true airspeed (m/s)",
             "Reference speed (m/s)",
         ],
+        x_label="Time (s)",
+        y_label="Airspeed (m/s)",
         alt="Observer airspeed compared with dynamics true airspeed and commanded speed",
     )
     observer_angle_col.line_chart(
@@ -2382,6 +2545,8 @@ with observer_tab:
         }),
         x="time_s",
         y=["Angle of attack (deg)", "Sideslip (deg)"],
+        x_label="Time (s)",
+        y_label="Aerodynamic angle (deg)",
         alt="Filtered angle-of-attack and sideslip estimates during transition",
     )
     st.line_chart(
@@ -2392,6 +2557,8 @@ with observer_tab:
         }),
         x="time_s",
         y=["Transition blend (0 hover – 1 cruise)", "Gain-schedule blend"],
+        x_label="Time (s)",
+        y_label="Transition progress (0–1)",
         alt="Observer transition progress compared with the controller gain-schedule blend",
     )
     st.caption(
@@ -2479,16 +2646,26 @@ with envelope_tab:
         "Actual tilt (deg)": data["tilt"],
         "Available control authority (%)": 100.0 * data["available_control_authority"],
     })
-    st.line_chart(
+    protection_tilt_col, protection_authority_col = st.columns(2)
+    protection_tilt_col.line_chart(
         protection_frame,
         x="time_s",
         y=[
             "Requested tilt (deg)",
             "Protected tilt target (deg)",
             "Actual tilt (deg)",
-            "Available control authority (%)",
         ],
-        alt="Requested, protected, and actual nacelle tilt with estimated control authority",
+        x_label="Time (s)",
+        y_label="Nacelle tilt (deg)",
+        alt="Requested, protected, and actual nacelle tilt",
+    )
+    protection_authority_col.line_chart(
+        protection_frame,
+        x="time_s",
+        y=["Available control authority (%)"],
+        x_label="Time (s)",
+        y_label="Available control authority (%)",
+        alt="Estimated available control authority through time",
     )
     reason_series = pd.Series(data["envelope_reasons"])
     reason_counts = (
@@ -2611,21 +2788,31 @@ with monte_carlo_tab:
         )
 
         pitch_chart_col, alpha_chart_col = st.columns(2)
+        pitch_figure = go.Figure(go.Histogram(
+            x=trial_frame["Peak |pitch| (deg)"],
+            name="Peak pitch",
+            nbinsx=12,
+        ))
+        pitch_figure.update_layout(
+            xaxis_title="Peak absolute pitch angle (deg)",
+            yaxis_title="Number of trials",
+        )
         pitch_chart_col.plotly_chart(
-            go.Figure(go.Histogram(
-                x=trial_frame["Peak |pitch| (deg)"],
-                name="Peak pitch",
-                nbinsx=12,
-            )),
+            pitch_figure,
             width="stretch",
             alt="Distribution of peak absolute pitch across Monte Carlo trials",
         )
+        alpha_figure = go.Figure(go.Histogram(
+            x=trial_frame["Peak |α| (deg)"],
+            name="Peak angle of attack",
+            nbinsx=12,
+        ))
+        alpha_figure.update_layout(
+            xaxis_title="Peak absolute angle of attack (deg)",
+            yaxis_title="Number of trials",
+        )
         alpha_chart_col.plotly_chart(
-            go.Figure(go.Histogram(
-                x=trial_frame["Peak |α| (deg)"],
-                name="Peak angle of attack",
-                nbinsx=12,
-            )),
+            alpha_figure,
             width="stretch",
             alt="Distribution of peak absolute angle of attack across Monte Carlo trials",
         )
@@ -2779,9 +2966,9 @@ else:
 # --- Layout ---
 fig_3d.update_layout(
     scene=dict(
-        xaxis_title='North (X)',
-        yaxis_title='East (Y)',
-        zaxis_title='Down (Z)',
+        xaxis_title='North X (m)',
+        yaxis_title='East Y (m)',
+        zaxis_title='Down Z (m)',
         xaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
         yaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
         zaxis=dict(range=[-2, 2], backgroundcolor="rgba(240, 240, 240, 0.5)"),
@@ -2872,7 +3059,9 @@ for m in tilted_motors:
 
 fig_cad.update_layout(
     scene=dict(
-        xaxis_title='X (Fwd)', yaxis_title='Y (Right)', zaxis_title='Z (Up)',
+        xaxis_title='X forward (m)',
+        yaxis_title='Y right (m)',
+        zaxis_title='Z up (m)',
         xaxis=dict(range=[-1.0, 1.0], backgroundcolor="rgba(240, 240, 240, 0.5)"),
         yaxis=dict(range=[-1.5, 1.5], backgroundcolor="rgba(240, 240, 240, 0.5)"),
         zaxis=dict(range=[-0.5, 0.5], backgroundcolor="rgba(240, 240, 240, 0.5)"),

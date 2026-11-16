@@ -7,3 +7,5 @@ pytest
 streamlit
 casadi
 trimesh
+openpyxl
+defusedxml
