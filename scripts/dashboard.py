@@ -5,9 +5,9 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import yaml
 import sys
 import os
+import hashlib
 import plotly.graph_objects as go
 
 # ==========================================================
@@ -40,17 +40,78 @@ from src.control.transition_observer import TransitionStateObserver
 from src.dynamics.mass_properties import MassProperties
 from src.dynamics.frames import rotation_body_to_earth
 from src.control.mission import MissionManager, MissionProfile, Waypoint
+from src.configuration.aircraft_profile import (
+    dashboard_defaults,
+    count_profile_values,
+    load_aircraft_profile,
+    profile_with_dashboard_values,
+    serialize_aircraft_profile,
+    simulation_compatibility_issues,
+)
+from src.configuration.aircraft_profile_preview import build_aircraft_profile_figure
 from src.wind.gust import DiscreteGust as FiniteDurationGust, DrydenGust
 from src.simulation.failures import ACTUATOR_CHANNELS
 from src.simulation.monte_carlo import MonteCarloValidator
 
+st.set_page_config(page_title="Tilt-rotor systems dashboard", layout="wide")
 
 # ==========================================================
 # 3. LOAD CONFIG
 # ==========================================================
 cfg_path = os.path.join(base_dir, "configs", "blue_uam.yaml")
-with open(cfg_path, "r") as f:
-    cfg = yaml.safe_load(f)
+profile_template_path = os.path.join(base_dir, "configs", "uam_profile_template.yaml")
+with open(profile_template_path, "rb") as profile_file:
+    template_profile_bytes = profile_file.read()
+uploaded_profile = st.sidebar.file_uploader(
+    "Load versioned aircraft profile (YAML/JSON)",
+    type=["yaml", "yml", "json"],
+    key="aircraft_profile_upload",
+)
+if uploaded_profile is not None:
+    profile_bytes = uploaded_profile.getvalue()
+    profile_filename = uploaded_profile.name
+else:
+    profile_bytes = template_profile_bytes
+    profile_filename = "uam_profile_template.yaml"
+
+profile_fingerprint = hashlib.sha256(profile_bytes).hexdigest()
+if st.session_state.get("_cached_aircraft_profile_fingerprint") == profile_fingerprint:
+    active_profile = st.session_state["_cached_aircraft_profile"]
+else:
+    try:
+        active_profile = load_aircraft_profile(profile_bytes, profile_filename)
+    except (TypeError, ValueError) as exc:
+        st.sidebar.error(f"Aircraft profile was not loaded: {exc}")
+        st.stop()
+    st.session_state["_cached_aircraft_profile"] = active_profile
+    st.session_state["_cached_aircraft_profile_fingerprint"] = profile_fingerprint
+
+try:
+    profile_defaults = dashboard_defaults(active_profile)
+except ValueError as exc:
+    st.sidebar.error(f"Aircraft profile parameters are invalid: {exc}")
+    st.stop()
+if st.session_state.get("_aircraft_profile_fingerprint") != profile_fingerprint:
+    for key, value in profile_defaults.items():
+        st.session_state[key] = value
+    for index, position in enumerate(profile_defaults["motor_positions"]):
+        st.session_state[f"geo_mx{index}"] = float(position[0])
+        st.session_state[f"geo_my{index}"] = float(position[1])
+        st.session_state[f"geo_mz{index}"] = float(position[2])
+        st.session_state[f"geo_tilt{index}"] = bool(position[3])
+    st.session_state["_aircraft_profile_fingerprint"] = profile_fingerprint
+
+for key, value in profile_defaults.items():
+    if key != "motor_positions" and st.session_state.get(key) is None:
+        st.session_state[key] = value
+for index, position in enumerate(profile_defaults["motor_positions"]):
+    for key, value in zip(
+        (f"geo_mx{index}", f"geo_my{index}", f"geo_mz{index}", f"geo_tilt{index}"),
+        (*position[:3], position[3]),
+    ):
+        if st.session_state.get(key) is None:
+            st.session_state[key] = value
+
 # Initialize the CAD Geometry engine
 
 geo_path = os.path.join(base_dir, "configs", "geometry_offsets.yaml")
@@ -66,35 +127,40 @@ GUST_DIRECTION_VECTORS = {
     "Diagonal": np.array([1.0, 1.0, -1.0]) / np.sqrt(3.0),
 }
 
-st.set_page_config(page_title="Tilt-rotor systems dashboard", layout="wide")
-st.title("Tilt-rotor systems dashboard")
-st.caption(
-    "Aircraft configuration · aerodynamics · propulsion and tilt · guidance and control · "
-    "mission management · disturbance rejection and safety"
-)
+st.title("KADA UAM Aircraft Transition FlightConfigurator")
+
 
 st.sidebar.title("Aircraft and mission setup")
+st.sidebar.caption(
+    f"Active profile: {active_profile['metadata']['name']} "
+    f"(schema {active_profile['schema_version']})"
+)
 side_tabs = st.sidebar.tabs(["Body", "Prop", "Geom", "Aero", "PID", "Gust", "Mission", "Safety"])
 
 with side_tabs[0]:
     st.markdown("**Component Masses (kg)**")
-    mass_fuselage = st.number_input("Fuselage Mass", value=3.0, step=0.1)
-    mass_wing = st.number_input("Wing Mass", value=1.0, step=0.1)
-    mass_vtail = st.number_input("V-Tail Mass", value=0.5, step=0.1)
-    mass_motor = st.number_input("Single Motor Mass", value=0.125, step=0.01)
+    mass_fuselage = st.number_input("Fuselage Mass", step=0.1, key="fuselage_mass_kg")
+    mass_wing = st.number_input("Wing Mass", step=0.1, key="wing_mass_kg")
+    mass_vtail = st.number_input("V-Tail Mass", step=0.1, key="vtail_mass_kg")
+    mass_motor = st.number_input("Single Motor Mass", step=0.01, key="motor_mass_kg")
     
     # Calculate total mass automatically
-    mass = mass_fuselage + mass_wing + mass_vtail + (4 * mass_motor)
+    mass = (
+        mass_fuselage
+        + mass_wing
+        + mass_vtail
+        + len(profile_defaults["motor_positions"]) * mass_motor
+    )
     st.info(f"Total Mass: **{mass:.2f} kg**")
     
 with side_tabs[1]:
     st.markdown("**Battery**")
     c1, c2 = st.columns(2)
-    battery_cells = c1.number_input("Cells (S)", value=6, step=1)
-    battery_mah = c2.number_input("Capacity (mAh)", value=5000, step=100)
+    battery_cells = c1.number_input("Cells (S)", step=1, key="battery_cells")
+    battery_mah = c2.number_input("Capacity (mAh)", step=100, key="battery_capacity_mah")
     
     c1, c2 = st.columns(2)
-    battery_c_rating = c1.number_input("C-Rating", value=30, step=5)
+    battery_c_rating = c1.number_input("C-Rating", step=5, key="battery_c_rating")
     battery_v_nom = battery_cells * 3.7
     battery_v_max = battery_cells * 4.2
     
@@ -102,16 +168,22 @@ with side_tabs[1]:
     st.info(f"Max Discharge Current: **{(battery_mah/1000)*battery_c_rating:.1f} A**")
     
     st.markdown("**Motor**")
-    motor_kv = st.number_input("Motor KV (RPM/V)", value=920, step=50)
+    motor_kv = st.number_input("Motor KV (RPM/V)", step=50, key="motor_kv")
     
     st.markdown("**Propeller**")
     c1, c2 = st.columns(2)
-    prop_dia = c1.number_input("Diameter (in)", value=12.0, step=0.5)
-    prop_pitch = c2.number_input("Pitch (in)", value=5.5, step=0.5)
+    prop_dia = c1.number_input("Diameter (in)", step=0.5, key="prop_diameter_in")
+    prop_pitch = c2.number_input("Pitch (in)", step=0.5, key="prop_pitch_in")
     
-    num_blades = st.number_input("Number of Blades", value=2, step=1, min_value=2, max_value=5)
+    num_blades = st.number_input(
+        "Number of Blades", step=1, min_value=2, max_value=5, key="prop_blades"
+    )
     max_tilt_rate_deg_s = st.slider(
-        "Maximum nacelle tilt rate (deg/s)", 1.0, 90.0, 30.0, 1.0, key="max_tilt_rate_deg_s"
+        "Maximum nacelle tilt rate (deg/s)",
+        1.0,
+        90.0,
+        step=1.0,
+        key="max_tilt_rate_deg_s",
     )
     
     # --- Physics Calculation ---
@@ -134,35 +206,55 @@ with side_tabs[1]:
     st.caption("Thrust estimate uses T = k·ω² and excludes ground effect and electrical limits.")
 
 with side_tabs[2]:
+    st.markdown("**Fuselage envelope (3D preview)**")
+    st.number_input(
+        "Length (m)", min_value=0.01, step=0.1, key="fuselage_length_m"
+    )
+    fuselage_col1, fuselage_col2 = st.columns(2)
+    fuselage_col1.number_input(
+        "Width (m)", min_value=0.01, step=0.01, key="fuselage_width_m"
+    )
+    fuselage_col2.number_input(
+        "Height (m)", min_value=0.01, step=0.01, key="fuselage_height_m"
+    )
+
     st.markdown("**Wing Planform (XFLR5 Style)**")
     c1, c2 = st.columns(2)
-    root_x = c1.number_input("Root LE X (m)", value=0.10, step=0.05, key="geo_root_x")
-    root_y = c2.number_input("Root Y (m)", value=0.0, step=0.05, key="geo_root_y")
+    root_x = c1.number_input("Root LE X (m)", step=0.05, key="wing_root_le_x_m")
+    root_y = c2.number_input("Root Y (m)", step=0.05, key="wing_root_y_m")
     
-    tip_x = c1.number_input("Tip LE X (m)", value=0.05, step=0.05, key="geo_tip_x")
-    tip_y = c2.number_input("Tip Y (m)", value=1.00, step=0.05, key="geo_tip_y")
+    tip_x = c1.number_input("Tip LE X (m)", step=0.05, key="wing_tip_le_x_m")
+    tip_y = c2.number_input("Tip Y (m)", step=0.05, key="wing_tip_y_m")
     
-    root_c = c1.number_input("Root Chord (m)", value=0.40, step=0.05, key="geo_root_c")
-    tip_c = c2.number_input("Tip Chord (m)", value=0.20, step=0.05, key="geo_tip_c")
+    root_c = c1.number_input("Root Chord (m)", step=0.05, key="wing_root_chord_m")
+    tip_c = c2.number_input("Tip Chord (m)", step=0.05, key="wing_tip_chord_m")
     
-    sweep = st.number_input("Sweep Angle (deg)", value=0.0, step=5.0, key="geo_sweep")
+    sweep = st.number_input("Sweep Angle (deg)", step=5.0, key="wing_sweep_deg")
     
     st.markdown("**V-Tail**")
-    vt_root_x = st.number_input("V-Tail Root X (m)", value=-0.6, step=0.05, key="geo_vt_x")
-    vt_tip_y = st.number_input("V-Tail Tip Y (m)", value=0.3, step=0.05, key="geo_vt_y")
-    vt_tip_z = st.number_input("V-Tail Tip Z (m)", value=-0.15, step=0.05, key="geo_vt_z")
-    vtail_area = st.number_input("V-Tail Area", value=0.1, step=0.01, key="geo_vt_area")
-    vtail_arm = st.number_input("V-Tail Arm (m)", value=0.5, step=0.05, key="geo_vt_arm")
+    vt_root_x = st.number_input("V-Tail Root X (m)", step=0.05, key="vtail_root_x_m")
+    st.number_input("V-Tail Tip LE X (m)", step=0.05, key="vtail_tip_x_m")
+    vt_tip_y = st.number_input("V-Tail Tip Y (m)", step=0.05, key="vtail_tip_y_m")
+    vt_tip_z = st.number_input("V-Tail Tip Z (m)", step=0.05, key="vtail_tip_z_m")
+    vtail_area = st.number_input("V-Tail Area", step=0.01, key="vtail_area_m2")
+    vtail_arm = st.number_input("V-Tail Arm (m)", step=0.05, key="vtail_arm_m")
     
+    st.markdown("**Shared rotor tilt axis location (X/Z plane, m)**")
+    pivot_col1, pivot_col2 = st.columns(2)
+    pivot_col1.number_input("Pivot X", step=0.05, key="motor_tilt_pivot_x_m")
+    pivot_col2.number_input(
+        "Pivot Z (down positive)", step=0.05, key="motor_tilt_pivot_z_m"
+    )
+
     st.markdown("**Motors**")
-    def_motors = cfg.get('motor_positions', [[0.3, 0.4, 0.0, True], [0.3, -0.4, 0.0, True], [-0.3, 0.4, 0.0, False], [-0.3, -0.4, 0.0, False]])
+    def_motors = profile_defaults["motor_positions"]
     motor_positions = []
-    for i in range(4):
+    for i in range(len(def_motors)):
         c1, c2, c3, c4 = st.columns(4)
-        mx = c1.number_input(f"X{i+1}", value=float(def_motors[i][0]), step=0.05, key=f"geo_mx{i}")
-        my = c2.number_input(f"Y{i+1}", value=float(def_motors[i][1]), step=0.05, key=f"geo_my{i}")
-        mz = c3.number_input(f"Z{i+1}", value=float(def_motors[i][2]), step=0.01, key=f"geo_mz{i}")
-        tilts = c4.checkbox(f"Tilt{i+1}", value=bool(def_motors[i][3]), key=f"geo_tilt{i}")
+        mx = c1.number_input(f"X{i+1}", step=0.05, key=f"geo_mx{i}")
+        my = c2.number_input(f"Y{i+1}", step=0.05, key=f"geo_my{i}")
+        mz = c3.number_input(f"Z{i+1}", step=0.01, key=f"geo_mz{i}")
+        tilts = c4.checkbox(f"Tilt{i+1}", key=f"geo_tilt{i}")
         motor_positions.append([mx, my, mz, tilts])
 
 with side_tabs[3]:
@@ -184,27 +276,27 @@ with side_tabs[3]:
     
 
 with side_tabs[4]:
-    alt_kp = st.number_input("Alt Kp", value=1.5, step=0.1)
-    alt_ki = st.number_input("Alt Ki", value=0.05, step=0.01)
-    alt_kd = st.number_input("Alt Kd", value=0.1, step=0.01)
-    spd_kp = st.number_input("Spd Kp", value=0.1, step=0.01)
-    spd_ki = st.number_input("Spd Ki", value=0.0, step=0.01)
-    spd_kd = st.number_input("Spd Kd", value=0.01, step=0.01)
-    att_kp = st.number_input("Att Kp", value=1.0, step=0.1)
-    att_ki = st.number_input("Att Ki", value=0.0, step=0.1)
-    att_kd = st.number_input("Att Kd", value=0.05, step=0.01)
-    rate_kp = st.number_input("Rate Kp", value=0.5, step=0.05)
-    rate_ki = st.number_input("Rate Ki", value=0.0, step=0.01)
-    rate_kd = st.number_input("Rate Kd", value=0.01, step=0.01)
+    alt_kp = st.number_input("Alt Kp", step=0.1, key="alt_kp")
+    alt_ki = st.number_input("Alt Ki", step=0.01, key="alt_ki")
+    alt_kd = st.number_input("Alt Kd", step=0.01, key="alt_kd")
+    spd_kp = st.number_input("Spd Kp", step=0.01, key="speed_kp")
+    spd_ki = st.number_input("Spd Ki", step=0.01, key="speed_ki")
+    spd_kd = st.number_input("Spd Kd", step=0.01, key="speed_kd")
+    att_kp = st.number_input("Att Kp", step=0.1, key="attitude_kp")
+    att_ki = st.number_input("Att Ki", step=0.1, key="attitude_ki")
+    att_kd = st.number_input("Att Kd", step=0.01, key="attitude_kd")
+    rate_kp = st.number_input("Rate Kp", step=0.05, key="rate_kp")
+    rate_ki = st.number_input("Rate Ki", step=0.01, key="rate_ki")
+    rate_kd = st.number_input("Rate Kd", step=0.01, key="rate_kd")
     hover_rate_scale = st.slider(
-        "Hover rate-gain scale", 0.5, 2.5, 1.5, 0.05, key="hover_rate_scale"
+        "Hover rate-gain scale", 0.5, 2.5, step=0.05, key="hover_rate_scale"
     )
     cruise_rate_scale = st.slider(
-        "Cruise rate-gain scale", 0.25, 1.5, 0.75, 0.05, key="cruise_rate_scale"
+        "Cruise rate-gain scale", 0.25, 1.5, step=0.05, key="cruise_rate_scale"
     )
 
 with side_tabs[5]:
-    gust_enabled = st.checkbox("Enable wind disturbance", value=True, key="gust_enabled")
+    gust_enabled = st.checkbox("Enable wind disturbance", key="gust_enabled")
     gust_model = st.selectbox(
         "Wind model",
         ["Finite-duration gust", "Dryden turbulence"],
@@ -212,19 +304,27 @@ with side_tabs[5]:
         key="gust_model",
     )
     if gust_enabled and gust_model == "Finite-duration gust":
-        gust_start = st.slider("Start Time (s)", 0.0, 15.0, 5.0, 0.5)
-        gust_duration = st.slider("Duration (s)", 0.5, 5.0, 2.0, 0.5)
-        gust_mag = st.slider("Magnitude (m/s)", 0.0, 15.0, 6.0, 0.5)
-        gust_dir = st.selectbox("Direction", ["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"])
-        dryden_sigma = 2.5
-        dryden_tau_s = 1.0
+        gust_start = st.slider("Start Time (s)", 0.0, 15.0, step=0.5, key="gust_start_s")
+        gust_duration = st.slider(
+            "Duration (s)", 0.5, 5.0, step=0.5, key="gust_duration_s"
+        )
+        gust_mag = st.slider(
+            "Magnitude (m/s)", 0.0, 15.0, step=0.5, key="gust_magnitude_mps"
+        )
+        gust_dir = st.selectbox(
+            "Direction",
+            ["Front", "Back", "Left", "Right", "Up", "Down", "Diagonal"],
+            key="gust_direction",
+        )
+        dryden_sigma = profile_defaults["dryden_sigma_mps"]
+        dryden_tau_s = profile_defaults["dryden_tau_s"]
     elif gust_enabled:
         dryden_sigma = st.slider(
-            "Longitudinal and lateral gust σ (m/s)", 0.0, 8.0, 2.5, 0.25,
-            key="dryden_sigma",
+            "Longitudinal and lateral gust σ (m/s)", 0.0, 8.0, step=0.25,
+            key="dryden_sigma_mps",
         )
         dryden_tau_s = st.slider(
-            "Gust correlation time (s)", 0.1, 5.0, 1.0, 0.1,
+            "Gust correlation time (s)", 0.1, 5.0, step=0.1,
             key="dryden_tau_s",
         )
         gust_start, gust_duration, gust_mag, gust_dir = 0.0, 63.0, 0.0, "Dryden turbulence"
@@ -295,26 +395,26 @@ with side_tabs[6]:
 with side_tabs[7]:
     st.markdown("**Transition protection**")
     enable_envelope_protection = st.checkbox(
-        "Enable envelope protection", value=True, key="enable_envelope_protection"
+        "Enable envelope protection", key="enable_envelope_protection"
     )
     observer_time_constant_s = st.slider(
-        "Observer filter time constant (s)", 0.05, 1.0, 0.25, 0.05,
+        "Observer filter time constant (s)", 0.05, 1.0, step=0.05,
         key="observer_time_constant_s",
     )
     max_alpha_deg = st.slider(
-        "Maximum angle of attack (deg)", 5.0, 30.0, 15.0, 1.0,
+        "Maximum angle of attack (deg)", 5.0, 30.0, step=1.0,
         key="max_alpha_deg",
     )
     max_pitch_deg = st.slider(
-        "Maximum pitch protection limit (deg)", 20.0, 60.0, 60.0, 1.0,
+        "Maximum pitch protection limit (deg)", 20.0, 60.0, step=1.0,
         key="max_pitch_deg",
     )
     max_body_rate_deg_s = st.slider(
-        "Maximum body rate (deg/s)", 30.0, 240.0, 180.0, 5.0,
+        "Maximum body rate (deg/s)", 30.0, 240.0, step=5.0,
         key="max_body_rate_deg_s",
     )
     speed_margin_mps = st.slider(
-        "Transition-envelope speed margin (m/s)", 0.0, 3.0, 0.5, 0.1,
+        "Transition-envelope speed margin (m/s)", 0.0, 3.0, step=0.1,
         key="speed_margin_mps",
     )
     st.markdown("**Monte Carlo validation**")
@@ -334,6 +434,94 @@ with side_tabs[7]:
         key="monte_carlo_failure_probability",
     )
     st.caption("Actuator faults begin between 5 and 45 s; each trial uses a reproducible seed.")
+
+dashboard_profile_values = {
+    key: st.session_state[key]
+    for key in profile_defaults
+    if key != "motor_positions"
+}
+dashboard_profile_values["motor_positions"] = [
+    [float(x), float(y), float(z), bool(tilts)]
+    for x, y, z, tilts in motor_positions
+]
+export_profile = profile_with_dashboard_values(active_profile, dashboard_profile_values)
+dashboard_values_fingerprint = hashlib.sha256(
+    (profile_fingerprint + repr(dashboard_profile_values)).encode("utf-8")
+).hexdigest()
+with st.sidebar.expander("Aircraft profile export"):
+    st.caption(
+        "Profiles preserve custom aircraft, sensor, actuator, control, and hardware fields. "
+        "Only the four-rotor tiltrotor subset is currently simulated."
+    )
+    if st.button("Prepare current profile for download", key="prepare_aircraft_profile"):
+        st.session_state["aircraft_profile_download_bytes"] = serialize_aircraft_profile(
+            export_profile
+        )
+        st.session_state["aircraft_profile_download_fingerprint"] = (
+            dashboard_values_fingerprint
+        )
+    if (
+        st.session_state.get("aircraft_profile_download_fingerprint")
+        == dashboard_values_fingerprint
+    ):
+        st.download_button(
+            "Download active profile (JSON)",
+            data=st.session_state["aircraft_profile_download_bytes"],
+            file_name="aircraft_profile.json",
+            mime="application/json",
+            key="download_active_aircraft_profile",
+        )
+    else:
+        st.info("Prepare a fresh download after changing aircraft parameters.")
+    st.download_button(
+        "Download editable profile template (YAML)",
+        data=template_profile_bytes,
+        file_name="uam_profile_template.yaml",
+        mime="application/yaml",
+        key="download_aircraft_profile_template",
+    )
+    st.caption(
+        "PX4 / MAVLink is profile metadata only. No autopilot connection or actuator command "
+        "path is implemented."
+    )
+
+st.markdown("---")
+st.subheader("3D aircraft profile preview")
+st.caption(
+    "This live preview uses the active profile and current geometry controls, including for "
+    "aircraft the simulator cannot run. Inputs use X-forward, Y-right, Z-down coordinates; "
+    "the view displays Z-up. The fuselage is centered at the origin, and lifting-surface "
+    "thickness and V-tail taper are schematic."
+)
+profile_preview_tilt_deg = st.slider(
+    "Preview rotor tilt angle (deg)",
+    min_value=0.0,
+    max_value=90.0,
+    value=0.0,
+    step=1.0,
+    key="aircraft_profile_preview_tilt_deg",
+)
+profile_preview_figure = build_aircraft_profile_figure(
+    active_profile["metadata"]["name"],
+    dashboard_profile_values,
+    profile_preview_tilt_deg,
+)
+st.plotly_chart(
+    profile_preview_figure,
+    width="stretch",
+    alt=f"3D profile preview of {active_profile['metadata']['name']} with configured lifting surfaces and rotors",
+    key="aircraft_profile_preview",
+)
+
+profile_compatibility_issues = simulation_compatibility_issues(export_profile)
+if profile_compatibility_issues:
+    st.error(
+        "This aircraft profile can be inspected and exported, but the current simulation "
+        "adapter cannot run it."
+    )
+    for issue in profile_compatibility_issues:
+        st.write(f"- {issue}")
+    st.stop()
 
 # Map gust settings to the wind variables expected by run_simulation
 wind_enabled = gust_enabled
@@ -357,6 +545,8 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     props.mass_vtail = mass_vtail
     props.mass_motor = mass_motor
     props.total_mass = mass
+    props.vtail_area = vtail_area
+    props.vtail_arm = vtail_arm
     props.wingspan = wingspan
     props.root_chord = root_c
     props.tip_chord = tip_c
@@ -2195,6 +2385,78 @@ with monte_carlo_tab:
             "|α| ≤ 25°, minimum altitude ≥ 0 m, and mission completion. "
             "This Monte Carlo batch is a model validation aid, not flight certification."
         )
+
+# ==========================================================
+# PHASE 8: AIRCRAFT PROFILE AND BENCH HIL READINESS
+# ==========================================================
+st.markdown("---")
+st.subheader("Aircraft profile and PX4 bench-HIL readiness")
+st.caption(
+    "Load and version aircraft data independently of this example model. Custom fields are "
+    "preserved in profile files; only the currently supported four-rotor tiltrotor subset "
+    "is used by the flight simulation."
+)
+profile_tab, hil_tab = st.tabs(["8.1 Aircraft profile", "8.2 PX4 bench-HIL boundary"])
+
+with profile_tab:
+    aircraft_data = export_profile.get("aircraft", {})
+    if st.session_state.get("_aircraft_summary_fingerprint") != profile_fingerprint:
+        profile_summary = {
+            "parameter_count": count_profile_values(aircraft_data),
+            "extension_count": count_profile_values(export_profile.get("extensions", {})),
+            "subsystems": [
+                {
+                    "Subsystem": name.replace("_", " ").title(),
+                    "Configured values": count_profile_values(value),
+                    "Status": "Present" if value else "Not defined",
+                }
+                for name, value in aircraft_data.items()
+            ] if isinstance(aircraft_data, dict) else [],
+        }
+        st.session_state["_aircraft_summary"] = profile_summary
+        st.session_state["_aircraft_summary_fingerprint"] = profile_fingerprint
+    profile_summary = st.session_state["_aircraft_summary"]
+    profile_metrics = st.columns(4)
+    profile_metrics[0].metric("Profile", active_profile["metadata"]["name"])
+    profile_metrics[1].metric("Schema version", str(active_profile["schema_version"]))
+    profile_metrics[2].metric(
+        "Aircraft data values", f"{profile_summary['parameter_count']:,}"
+    )
+    profile_metrics[3].metric(
+        "Custom extension values",
+        f"{profile_summary['extension_count']:,}",
+    )
+    st.dataframe(
+        pd.DataFrame(profile_summary["subsystems"]),
+        hide_index=True,
+        alt="Aircraft profile subsystem coverage and configured value counts",
+    )
+    st.info(
+        "Use the YAML template for detailed mass properties, geometry, propulsion, "
+        "aerodynamics, actuators, sensors, control allocation, transition limits, wind, "
+        "faults, and PX4 bench metadata. Add aircraft-specific fields under extensions; "
+        "the loader retains fields it does not yet model."
+    )
+
+with hil_tab:
+    hardware_profile = export_profile.get("hardware", {})
+    hil_metrics = st.columns(3)
+    hil_metrics[0].metric("Autopilot", str(hardware_profile.get("autopilot", "Not specified")))
+    hil_metrics[1].metric("Protocol", str(hardware_profile.get("protocol", "Not specified")))
+    hil_metrics[2].metric(
+        "Execution mode",
+        str(hardware_profile.get("execution_mode", "simulation")),
+    )
+    st.warning(
+        "This project does not connect to PX4 or transmit actuator commands. The hardware "
+        "section is configuration metadata only; bench testing must keep propulsion outputs "
+        "physically disconnected or independently inhibited."
+    )
+    st.markdown(
+        "Before any future HIL adapter is enabled, verify sensor/actuator scaling, transport "
+        "timeouts, command freshness, watchdog behavior, failsafe transitions, and independent "
+        "output inhibition on a bench rig. This dashboard is not a flight-control system."
+    )
 
 # ==========================================================
 # 3D COORDINATE FRAME & CAD MODEL VISUALIZATION
