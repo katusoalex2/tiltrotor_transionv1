@@ -29,6 +29,7 @@ from src.dynamics.tiltrotor import TiltrotorDynamics
 from src.dynamics.transition import (
     control_effectiveness_map,
     solve_longitudinal_trim,
+    transition_stability_map,
     transition_speed_envelope,
 )
 from src.aero.vtail import VtailModel
@@ -1565,16 +1566,27 @@ c1.metric("Total Mass", f"{props.total_mass:.2f} kg")
 c2.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m²")
 c3.metric("Static Margin", f"{sm_pct:.1f} %")
 
-# Condition logic based on aerospace standards
-if sm_pct < 0.0:
-    c4.error("🔴 UNSTABLE: Pitch divergence")
-    st.error("🚨 **CRITICAL WARNING:** Static Margin is negative. The Aerodynamic Center is *ahead* of the CG. The drone will flip backwards during transition.")
+# The neutral-point calculation is a geometry estimate relative to an assumed CG origin.
+if sm_pct <= 0.0:
+    c4.error("Non-positive estimate")
+    st.error(
+        "The simplified neutral-point estimate is non-positive relative to the assumed "
+        "CG origin. This can indicate a longitudinal static-stability concern; verify the "
+        "actual center of gravity and aerodynamic derivatives before drawing conclusions."
+    )
 elif sm_pct > 20.0:
-    c4.warning("🟡 OVER-STABLE: Too sluggish")
-    st.warning("⚠️ **WARNING:** Static Margin > 20%. The aircraft is too stable. It will refuse to pitch and require massive V-tail deflection to transition. This will cause aerodynamic drag and power loss.")
+    c4.warning("Above the dashboard range")
+    st.warning(
+        "The geometry-based static-margin estimate is above 20%. This simplified "
+        "estimate alone does not establish that the aircraft is over-stable or unsafe."
+    )
 else:
-    c4.success(f"🟢 STABLE ({sm_pct:.1f}%)")
-    st.success("✅ **SAFE:** Static Margin is within the optimal 0-20% range. Pitch response will be predictable during transition.")
+    c4.metric("Positive estimate", f"{sm_pct:.1f}%")
+    st.info(
+        "A positive geometry-based static-margin estimate does not demonstrate static "
+        "or dynamic stability. It assumes the CG is at the model origin; use the "
+        "transition derivative map and aircraft-specific test data for further analysis."
+    )
 
 st.markdown("---")
 st.subheader("3x3 Inertia Tensor & Mass Properties")
@@ -1669,8 +1681,13 @@ trim = solve_longitudinal_trim(
     tail_limit_rad=tail_limit_rad,
 )
 
-corridor_tab, effectiveness_tab, trim_tab = st.tabs(
-    ["5.1 Transition corridor", "5.2 Control effectiveness", "5.3 Trim analysis"]
+corridor_tab, effectiveness_tab, trim_tab, stability_tab = st.tabs(
+    [
+        "5.1 Transition corridor",
+        "5.2 Control effectiveness",
+        "5.3 Trim analysis",
+        "5.4 Stability map",
+    ]
 )
 
 with corridor_tab:
@@ -1812,6 +1829,238 @@ with trim_tab:
             "No feasible trim was found within the angle-of-attack, motor, and V-tail limits. "
             f"Optimizer: {trim['solver_message']}"
         )
+
+with stability_tab:
+    st.caption(
+        "The map finite-differences body-moment coefficients around the longitudinal "
+        "trim solution (or the optimizer's best-fit point) across airspeed and nacelle tilt."
+    )
+    st.info(
+        "Static sign checks from the supplied reference: longitudinal C_mα < 0, "
+        "lateral C_lβ < 0, and directional C_nβ > 0. These local derivatives do not "
+        "establish dynamic stability."
+    )
+    st.warning(
+        "Simulation-only model check: the aerodynamic model uses built-in simplified "
+        "coefficients rather than measured aircraft data, and the uploaded profile's "
+        "aerodynamic coefficient fields are not yet wired into that model. A failed "
+        "longitudinal trim means that cell's derivatives are exploratory, not stability "
+        "evidence. This analysis does not issue or change actuator commands."
+    )
+    st.caption(
+        "The fixed grid uses 0–30 m/s in 5 m/s steps and 0–90° tilt in 15° steps. "
+        "The calculation is on demand and is invalidated when the active aircraft settings change."
+    )
+
+    stability_signature = (
+        dashboard_values_fingerprint,
+        float(analysis_aero.CL_alpha),
+        float(analysis_aero.CL_0),
+        float(analysis_aero.CD_0),
+        float(analysis_aero.AR),
+        float(analysis_aero.stall_angle),
+        float(analysis_aero.Cm_0),
+        float(analysis_aero.Cm_alpha),
+        float(analysis_aero.chord),
+        float(analysis_aero.x_ac),
+        float(analysis_vtail.CL_alpha_tail),
+        float(analysis_vtail.CD_0_tail),
+        float(analysis_vtail.AR_tail),
+        float(analysis_vtail.dihedral),
+    )
+    if st.button("Compute stability map", key="compute_transition_stability_map"):
+        with st.spinner("Solving trim and evaluating local derivatives across the transition grid..."):
+            stability_result = transition_stability_map(
+                analysis_dynamics,
+                airspeeds_mps=np.arange(0.0, 31.0, 5.0),
+                tilt_angles_rad=np.deg2rad(np.arange(0.0, 91.0, 15.0)),
+                tail_limit_rad=tail_limit_rad,
+            )
+        st.session_state["transition_stability_map_result"] = {
+            "signature": stability_signature,
+            "result": stability_result,
+        }
+
+    map_record = st.session_state.get("transition_stability_map_result")
+    if not isinstance(map_record, dict):
+        st.info("Compute the map to inspect trim quality, static derivatives, and actuator response.")
+    elif map_record.get("signature") != stability_signature:
+        st.info("Aircraft settings changed. Recompute the map before using these results.")
+    else:
+        stability_result = map_record["result"]
+        assessed = np.asarray(stability_result["assessment_mask"], dtype=bool)
+        trim_feasible = np.asarray(stability_result["trim_feasible"], dtype=bool)
+        assessed_count = int(np.count_nonzero(assessed))
+        total_points = int(trim_feasible.size)
+        stability_columns = st.columns(2)
+        stability_columns[0].metric(
+            "Longitudinal trim-feasible points",
+            f"{int(np.count_nonzero(trim_feasible))}/{total_points}",
+        )
+        stability_columns[1].metric(
+            "Static-derivative assessment points",
+            f"{assessed_count}/{total_points}",
+        )
+        if assessed_count == 0:
+            st.warning(
+                "No grid point has both feasible longitudinal trim and nonzero modeled "
+                "aerodynamic pressure. Static stability is therefore not established "
+                "for this grid."
+            )
+
+        derivative_specs = (
+            ("Longitudinal C_mα (1/rad)", "cm_alpha_per_rad", -1.0),
+            ("Lateral C_lβ (1/rad)", "cl_beta_per_rad", -1.0),
+            ("Directional C_nβ (1/rad)", "cn_beta_per_rad", 1.0),
+        )
+        derivative_columns = st.columns(3)
+        airspeeds = np.asarray(stability_result["airspeeds_mps"], dtype=float)
+        tilts_deg = np.asarray(stability_result["tilt_angles_deg"], dtype=float)
+        trim_residuals = np.asarray(stability_result["trim_residual"], dtype=float)
+        trim_hover = trim_feasible.astype(float)
+        derivative_customdata = np.stack((trim_hover, trim_residuals), axis=-1)
+        sign_failures = False
+
+        for column, (title, key, stable_sign) in zip(
+            derivative_columns,
+            derivative_specs,
+        ):
+            derivative_values = np.asarray(stability_result[key], dtype=float)
+            if assessed_count:
+                assessed_values = derivative_values[assessed]
+                sign_consistent_count = int(
+                    np.count_nonzero(assessed_values * stable_sign > 0.0)
+                )
+                column.metric(
+                    f"{title} sign-consistent",
+                    f"{sign_consistent_count}/{assessed_count}",
+                )
+                sign_failures |= sign_consistent_count < assessed_count
+            else:
+                column.metric(f"{title} sign check", "Not assessed")
+
+            figure = go.Figure(go.Heatmap(
+                z=derivative_values,
+                x=tilts_deg,
+                y=airspeeds,
+                customdata=derivative_customdata,
+                colorscale="RdBu",
+                zmid=0.0,
+                colorbar=dict(title="1/rad"),
+                hovertemplate=(
+                    "Airspeed: %{y:.1f} m/s<br>"
+                    "Tilt: %{x:.0f}°<br>"
+                    "Derivative: %{z:.5g} 1/rad<br>"
+                    "Longitudinal trim feasible: %{customdata[0]:.0f}<br>"
+                    "Trim residual: %{customdata[1]:.4f}"
+                    "<extra></extra>"
+                ),
+            ))
+            figure.update_layout(
+                title=title,
+                xaxis_title="Nacelle tilt (deg)",
+                yaxis_title="Airspeed (m/s)",
+                margin=dict(l=20, r=20, t=55, b=20),
+                height=340,
+            )
+            column.plotly_chart(
+                figure,
+                width="stretch",
+                alt=f"{title} across airspeed and nacelle tilt; hover values include trim status",
+                key=f"transition_{key}_heatmap",
+            )
+
+        if sign_failures:
+            st.warning(
+                "At least one trim-qualified grid point does not meet a reference static "
+                "derivative sign check. Review the model and aircraft data; this is not "
+                "a flight-control command or certification result."
+            )
+
+        trim_figure = go.Figure(go.Heatmap(
+            z=trim_hover,
+            x=tilts_deg,
+            y=airspeeds,
+            customdata=trim_residuals,
+            zmin=0.0,
+            zmax=1.0,
+            colorscale="RdYlGn",
+            colorbar=dict(
+                title="Longitudinal trim",
+                tickmode="array",
+                tickvals=[0.0, 1.0],
+                ticktext=["Not feasible", "Feasible"],
+            ),
+            hovertemplate=(
+                "Airspeed: %{y:.1f} m/s<br>"
+                "Tilt: %{x:.0f}°<br>"
+                "Trim feasible: %{z:.0f}<br>"
+                "Maximum normalized residual: %{customdata:.4f}"
+                "<extra></extra>"
+            ),
+        ))
+        trim_figure.update_layout(
+            title="Longitudinal trim-feasibility mask",
+            xaxis_title="Nacelle tilt (deg)",
+            yaxis_title="Airspeed (m/s)",
+            margin=dict(l=20, r=20, t=55, b=20),
+            height=390,
+        )
+        st.plotly_chart(
+            trim_figure,
+            width="stretch",
+            alt="Longitudinal trim feasibility and residual across airspeed and nacelle tilt",
+            key="transition_trim_feasibility_heatmap",
+        )
+
+        effectiveness = np.asarray(
+            stability_result["control_effectiveness_nm"],
+            dtype=float,
+        )
+        effectiveness_labels = tuple(
+            stability_result["control_effectiveness_labels"]
+        )
+        peak_axis_response = np.max(np.abs(effectiveness), axis=-1)
+        st.markdown("#### Actuator response across the transition grid")
+        st.caption(
+            "Heatmaps show the peak absolute moment change for each axis under the "
+            "existing standard rotor/V-tail test perturbations. This is a local response "
+            "comparison, not a full actuator-margin or dynamic-controllability assessment. "
+            f"Test patterns: {', '.join(effectiveness_labels)}."
+        )
+        control_specs = (
+            ("Roll moment response (N·m)", 0),
+            ("Pitch moment response (N·m)", 1),
+            ("Yaw moment response (N·m)", 2),
+        )
+        control_columns = st.columns(3)
+        for column, (title, axis_index) in zip(control_columns, control_specs):
+            figure = go.Figure(go.Heatmap(
+                z=peak_axis_response[:, :, axis_index],
+                x=tilts_deg,
+                y=airspeeds,
+                colorscale="Viridis",
+                colorbar=dict(title="N·m"),
+                hovertemplate=(
+                    "Airspeed: %{y:.1f} m/s<br>"
+                    "Tilt: %{x:.0f}°<br>"
+                    "Peak absolute response: %{z:.4g} N·m"
+                    "<extra></extra>"
+                ),
+            ))
+            figure.update_layout(
+                title=title,
+                xaxis_title="Nacelle tilt (deg)",
+                yaxis_title="Airspeed (m/s)",
+                margin=dict(l=20, r=20, t=55, b=20),
+                height=340,
+            )
+            column.plotly_chart(
+                figure,
+                width="stretch",
+                alt=f"{title} across airspeed and nacelle tilt",
+                key=f"transition_control_response_{axis_index}_heatmap",
+            )
 
 # ==========================================================
 # PHASE 6: CONTROL LAW ARCHITECTURE

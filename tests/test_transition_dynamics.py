@@ -8,6 +8,7 @@ from src.dynamics.tiltrotor import TiltrotorDynamics
 from src.dynamics.transition import (
     control_effectiveness_map,
     solve_longitudinal_trim,
+    transition_stability_map,
     transition_speed_envelope,
 )
 
@@ -81,3 +82,33 @@ def test_control_effectiveness_map_measures_motor_and_tail_moments():
     assert effectiveness.shape == (3, 5)
     assert abs(effectiveness[1, 1]) > 0.0
     assert abs(effectiveness[1, 3]) > 0.0
+
+
+def test_transition_stability_map_reports_trim_quality_and_local_derivatives():
+    result = transition_stability_map(
+        make_dynamics(),
+        airspeeds_mps=[0.0, 10.0],
+        tilt_angles_rad=[0.0, np.deg2rad(45.0)],
+    )
+
+    assert result["cm_alpha_per_rad"].shape == (2, 2)
+    assert result["control_effectiveness_nm"].shape == (2, 2, 3, 5)
+    assert result["control_effectiveness_labels"]
+    assert np.isnan(result["cm_alpha_per_rad"][0]).all()
+    assert not result["assessment_mask"][0].any()
+
+    assert np.isfinite(result["cm_alpha_per_rad"][1, 0])
+    assert result["cm_alpha_per_rad"][1, 0] < 0.0
+    assert result["cl_beta_per_rad"][1, 0] > 0.0
+    assert result["cn_beta_per_rad"][1, 0] > 0.0
+    assert not result["trim_feasible"][1, 0]
+    assert not result["assessment_mask"][1, 0]
+
+
+def test_transition_stability_map_rejects_unsorted_conditions():
+    with pytest.raises(ValueError, match="airspeeds must be"):
+        transition_stability_map(
+            make_dynamics(),
+            airspeeds_mps=[10.0, 5.0],
+            tilt_angles_rad=[0.0],
+        )
