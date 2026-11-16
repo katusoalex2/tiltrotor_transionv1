@@ -1,6 +1,8 @@
 ﻿
 # Cache Buster: 2026-11-11-00-37-15
 """KADA UAM Aircraft Transition FlightConfigurator"""
+from collections.abc import Mapping
+
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,6 +30,7 @@ from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
 from src.dynamics.transition import (
     control_effectiveness_map,
+    constrained_transition_corridor,
     solve_longitudinal_trim,
     transition_stability_map,
     transition_speed_envelope,
@@ -1826,6 +1829,102 @@ with corridor_tab:
         cd_0=analysis_aero.CD_0,
         aspect_ratio=analysis_aero.AR,
     )
+    transition_duration_s = st.slider(
+        "Available transition time (s)",
+        min_value=1.0,
+        max_value=60.0,
+        value=20.0,
+        step=1.0,
+        help="Used to check reachable nacelle tilt and average motor RPM change from hover.",
+        key="corridor_transition_duration_s",
+    )
+    if gust_enabled and gust_model == "Finite-duration gust":
+        gust_margin_mps = float(gust_mag)
+    elif gust_enabled and gust_model == "Dryden turbulence":
+        gust_margin_mps = float(
+            3.0 * np.linalg.norm([dryden_sigma, dryden_sigma, 0.6 * dryden_sigma])
+        )
+    else:
+        gust_margin_mps = 0.0
+
+    profile_aircraft = active_profile.get("aircraft", {})
+    profile_propulsion = (
+        profile_aircraft.get("propulsion", {})
+        if isinstance(profile_aircraft, Mapping)
+        else {}
+    )
+    profile_battery = profile_propulsion.get("battery", {})
+    profile_motor = profile_propulsion.get("motor", {})
+    profile_propeller = profile_propulsion.get("propeller", {})
+    profile_esc = profile_propulsion.get("esc", {})
+    profile_motor_dynamics = profile_propulsion.get("motor_dynamics", {})
+    electrical_parameters = {
+        "motor_kv_rpm_per_volt": float(motor_kv),
+        "motor_resistance_ohm": profile_motor.get("resistance_ohm"),
+        "motor_no_load_current_a": profile_motor.get("no_load_current_a"),
+        "motor_continuous_current_a": profile_motor.get("continuous_current_a"),
+        "propeller_torque_coefficient_nm_s2_rad2": profile_propeller.get(
+            "torque_coefficient_nm_s2_rad2"
+        ),
+        "battery_nominal_voltage_v": float(battery_v_nom),
+        "battery_internal_resistance_ohm": profile_battery.get(
+            "internal_resistance_ohm"
+        ),
+        "battery_capacity_ah": float(battery_mah) / 1000.0,
+        "battery_c_rating": float(battery_c_rating),
+        "battery_continuous_current_a": profile_battery.get(
+            "continuous_current_a"
+        ),
+        "esc_efficiency": profile_esc.get("efficiency"),
+        "esc_continuous_current_a": profile_esc.get("continuous_current_a"),
+        "motor_slew_rate_rpm_s": profile_motor_dynamics.get("slew_rate_rpm_s"),
+    }
+    corridor_signature = hashlib.sha256(
+        repr((
+            dashboard_values_fingerprint,
+            gust_margin_mps,
+            max_tilt_rate_deg_s,
+            transition_duration_s,
+            tuple(sorted(electrical_parameters.items())),
+        )).encode("utf-8")
+    ).hexdigest()
+    if st.button(
+        "Compute constrained corridor",
+        key="compute_constrained_transition_corridor",
+    ):
+        with st.spinner(
+            "Evaluating trim, pitch moment, static stability, gust reserve, and actuator limits..."
+        ):
+            corridor_result = constrained_transition_corridor(
+                analysis_dynamics,
+                max_thrust_per_rotor=max_rotor_thrust,
+                rotor_tilts=[bool(position[3]) for position in motor_positions],
+                airspeeds_mps=np.arange(0.0, 31.0, 1.0),
+                tilt_angles_deg=np.linspace(0.0, 90.0, 7),
+                max_tilt_rate_deg_s=float(max_tilt_rate_deg_s),
+                transition_duration_s=float(transition_duration_s),
+                gust_speed_margin_mps=gust_margin_mps,
+                electrical_parameters=electrical_parameters,
+                tail_limit_rad=tail_limit_rad,
+                cl_max=cl_max,
+                cd_0=analysis_aero.CD_0,
+                aspect_ratio=analysis_aero.AR,
+            )
+        st.session_state["constrained_transition_corridor_result"] = {
+            "signature": corridor_signature,
+            "result": corridor_result,
+        }
+
+    corridor_record = st.session_state.get("constrained_transition_corridor_result")
+    current_corridor_result = None
+    if isinstance(corridor_record, dict):
+        if corridor_record.get("signature") == corridor_signature:
+            current_corridor_result = corridor_record["result"]
+        else:
+            st.info(
+                "Corridor inputs changed. Recompute the constrained corridor to refresh its filters."
+            )
+
     feasible = envelope["feasible"]
     fig_corridor = go.Figure()
     if np.any(feasible):
@@ -1863,6 +1962,49 @@ with corridor_tab:
         line=dict(color="darkorange", width=2),
         name="Simulated transition",
     ))
+    if current_corridor_result is not None:
+        known_mask = np.asarray(
+            current_corridor_result["known_constraints_mask"],
+            dtype=bool,
+        )
+        qualified_mask = np.asarray(
+            current_corridor_result["qualified_mask"],
+            dtype=bool,
+        )
+        corridor_speeds = np.asarray(
+            current_corridor_result["airspeeds_mps"],
+            dtype=float,
+        )
+        corridor_tilts = np.asarray(
+            current_corridor_result["tilt_angles_deg"],
+            dtype=float,
+        )
+        known_speed_indices, known_tilt_indices = np.where(
+            known_mask & ~qualified_mask
+        )
+        if known_speed_indices.size:
+            fig_corridor.add_trace(go.Scatter(
+                x=corridor_tilts[known_tilt_indices],
+                y=corridor_speeds[known_speed_indices],
+                mode="markers",
+                marker=dict(color="purple", size=6, symbol="circle-open"),
+                name="Known filters pass; incomplete",
+                hovertemplate=(
+                    "Tilt: %{x:.0f}°<br>Airspeed: %{y:.1f} m/s"
+                    "<br>Electrical/motor-slew filters may be unresolved"
+                    "<extra></extra>"
+                ),
+            ))
+        qualified_speed_indices, qualified_tilt_indices = np.where(qualified_mask)
+        if qualified_speed_indices.size:
+            fig_corridor.add_trace(go.Scatter(
+                x=corridor_tilts[qualified_tilt_indices],
+                y=corridor_speeds[qualified_speed_indices],
+                mode="markers",
+                marker=dict(color="green", size=7, symbol="diamond"),
+                name="All configured filters pass",
+                hovertemplate="Tilt: %{x:.0f}°<br>Airspeed: %{y:.1f} m/s<extra></extra>",
+            ))
     fig_corridor.update_layout(
         xaxis_title="Nacelle tilt (deg)",
         yaxis_title="True airspeed (m/s)",
@@ -1873,13 +2015,137 @@ with corridor_tab:
     st.plotly_chart(
         fig_corridor,
         width="stretch",
-        alt="Tilt versus airspeed transition corridor with minimum and maximum quasi-steady speed bounds and the simulated flight path",
+        alt="Tilt versus airspeed transition corridor with analytical bounds, simulated flight path, and optional constrained grid results",
     )
     st.caption(
-        "Bounds use maximum rotor thrust, wing CLmax/stall speed, and the aircraft drag polar. "
-        "They exclude gusts, actuator rate, electrical limits, and pitch-moment constraints; "
-        "treat this as a design estimate, not a certified safe corridor."
+        "The blue band is the analytical thrust/lift/drag envelope. Purple points pass the "
+        "available trim, pitch-moment, static-derivative-sign, configured gust-reserve, and "
+        "nacelle-rate screens; green points additionally pass assessed motor-slew and "
+        "electrical limits. Missing electrical or motor data are never treated as a pass. "
+        "The gust screen is an airspeed reserve, not a transient gust-response proof."
     )
+    if current_corridor_result is None:
+        st.info(
+            "Compute the constrained grid to filter the analytical corridor with trim and stability."
+        )
+    else:
+        analytic_count = int(np.count_nonzero(current_corridor_result["analytic_mask"]))
+        known_count = int(np.count_nonzero(current_corridor_result["known_constraints_mask"]))
+        qualified_count = int(np.count_nonzero(current_corridor_result["qualified_mask"]))
+        analytic_mask = np.asarray(current_corridor_result["analytic_mask"], dtype=bool)
+        electrical_assessed_count = int(
+            np.count_nonzero(
+                analytic_mask
+                & np.asarray(current_corridor_result["electrical_assessed_mask"], dtype=bool)
+            )
+        )
+        electrical_pass_count = int(
+            np.count_nonzero(
+                analytic_mask
+                & np.asarray(current_corridor_result["electrical_feasible_mask"], dtype=bool)
+            )
+        )
+        slew_assessed_count = int(
+            np.count_nonzero(
+                analytic_mask
+                & np.asarray(current_corridor_result["motor_slew_assessed_mask"], dtype=bool)
+            )
+        )
+        slew_pass_count = int(
+            np.count_nonzero(
+                analytic_mask
+                & np.asarray(current_corridor_result["motor_slew_feasible_mask"], dtype=bool)
+            )
+        )
+        status_columns = st.columns(5)
+        status_columns[0].metric("Analytical grid cells", str(analytic_count))
+        status_columns[1].metric("Known constraints pass", str(known_count))
+        status_columns[2].metric("Electrical cells assessed", str(electrical_assessed_count))
+        status_columns[3].metric("Motor slew cells assessed", str(slew_assessed_count))
+        status_columns[4].metric("All configured filters pass", str(qualified_count))
+        trim_mask = np.asarray(current_corridor_result["trim_mask"], dtype=bool)
+        pitch_mask = np.asarray(current_corridor_result["pitch_moment_mask"], dtype=bool)
+        stability_mask = np.asarray(
+            current_corridor_result["static_stability_mask"],
+            dtype=bool,
+        )
+        gust_mask = np.asarray(current_corridor_result["gust_mask"], dtype=bool)
+        actuator_mask = np.asarray(
+            current_corridor_result["actuator_rate_mask"],
+            dtype=bool,
+        )
+        constraint_rows = [
+            ("Analytical envelope", analytic_count, analytic_count),
+            (
+                "Longitudinal trim / force balance",
+                int(np.count_nonzero(analytic_mask & trim_mask)),
+                analytic_count,
+            ),
+            (
+                "Pitch-moment residual",
+                int(np.count_nonzero(analytic_mask & pitch_mask)),
+                analytic_count,
+            ),
+            (
+                "Static derivative signs",
+                int(np.count_nonzero(analytic_mask & stability_mask)),
+                analytic_count,
+            ),
+            (
+                "Configured gust airspeed reserve",
+                int(np.count_nonzero(analytic_mask & gust_mask)),
+                analytic_count,
+            ),
+            (
+                "Nacelle-rate reachable tilt",
+                int(np.count_nonzero(analytic_mask & actuator_mask)),
+                analytic_count,
+            ),
+            ("Electrical current / voltage", electrical_pass_count, electrical_assessed_count),
+            ("Motor RPM slew", slew_pass_count, slew_assessed_count),
+            ("All configured constraints", qualified_count, analytic_count),
+        ]
+        st.dataframe(
+            pd.DataFrame(
+                constraint_rows,
+                columns=["Constraint", "Passing cells", "Assessed cells"],
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        missing_electrical = tuple(
+            current_corridor_result["electrical_missing_parameters"]
+        )
+        if missing_electrical:
+            st.warning(
+                "Electrical feasibility is not assessed; fill these profile fields with "
+                "datasheet or bench values: "
+                + ", ".join(missing_electrical)
+                + "."
+            )
+        if slew_assessed_count == 0:
+            st.warning(
+                "Motor RPM slew is not assessed: set propulsion.motor_dynamics.slew_rate_rpm_s "
+                "in the uploaded profile. A time constant is not treated as an equivalent hard slew limit."
+            )
+        if qualified_count == 0:
+            st.warning(
+                "No grid cells currently pass every configured filter. Unassessed electrical "
+                "or motor-slew limits are intentionally not counted as feasible."
+            )
+        st.caption(
+            f"Configured gust airspeed reserve: {gust_margin_mps:.2f} m/s; "
+            f"available transition time: {transition_duration_s:.1f} s; "
+            f"maximum tilt rate: {max_tilt_rate_deg_s:.1f} deg/s. "
+            "Motor RPM slew uses the average change from hover trim over the full duration, "
+            "not a time-domain actuator simulation. The electrical estimate assumes "
+            "ESC current is motor-side current and uses continuous-current limits."
+        )
+        st.warning(
+            "This is a simulation-only screening corridor, not a certified or flight-ready "
+            "safe envelope. Static derivative signs are not dynamic-stability proof, and "
+            "the aerodynamic model remains simplified."
+        )
     if not np.any(feasible):
         st.warning("No quasi-steady corridor is feasible with the current mass, wing, and propulsion settings.")
 

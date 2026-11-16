@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 from scipy.optimize import least_squares
 
@@ -311,6 +313,8 @@ def transition_stability_map(
     ).copy()
     trim_feasible = np.zeros(shape, dtype=bool)
     trim_residual = np.full(shape, np.nan, dtype=float)
+    trim_motor_rpm = np.full(shape, np.nan, dtype=float)
+    trim_pitch_moment_residual = np.full(shape, np.nan, dtype=float)
     cm_alpha = np.full(shape, np.nan, dtype=float)
     cl_beta = np.full(shape, np.nan, dtype=float)
     cn_beta = np.full(shape, np.nan, dtype=float)
@@ -365,6 +369,10 @@ def transition_stability_map(
             )
             trim_feasible[speed_index, tilt_index] = bool(trim["feasible"])
             trim_residual[speed_index, tilt_index] = float(trim["max_normalized_residual"])
+            trim_motor_rpm[speed_index, tilt_index] = float(trim["motor_rpm"])
+            trim_pitch_moment_residual[speed_index, tilt_index] = float(
+                np.asarray(trim["normalized_residual"], dtype=float)[2]
+            )
 
             pitch_rad = float(np.deg2rad(trim["alpha_deg"]))
             tail_deflection = float(np.deg2rad(trim["tail_deflection_deg"]))
@@ -455,8 +463,330 @@ def transition_stability_map(
         "cn_beta_per_rad": cn_beta,
         "trim_feasible": trim_feasible,
         "trim_residual": trim_residual,
+        "trim_motor_rpm": trim_motor_rpm,
+        "trim_pitch_moment_residual": trim_pitch_moment_residual,
         "coefficient_valid": coefficient_valid,
         "assessment_mask": assessment_mask,
         "control_effectiveness_nm": control_effectiveness,
         "control_effectiveness_labels": effectiveness_labels or (),
+    }
+
+
+def assess_motor_electrical_point(
+    motor_rpm: float,
+    rotor_count: int,
+    parameters: Mapping[str, float | int | None],
+) -> dict[str, float | bool | tuple[str, ...]]:
+    """Estimate steady motor and battery current from a quadratic propeller torque model.
+
+    The estimate requires explicit motor, propeller, ESC, and battery data. It is
+    an engineering screen, not a substitute for measured propulsion maps.
+    """
+    required = (
+        "motor_kv_rpm_per_volt",
+        "motor_resistance_ohm",
+        "motor_no_load_current_a",
+        "motor_continuous_current_a",
+        "propeller_torque_coefficient_nm_s2_rad2",
+        "battery_nominal_voltage_v",
+        "battery_internal_resistance_ohm",
+        "battery_capacity_ah",
+        "battery_c_rating",
+        "battery_continuous_current_a",
+        "esc_efficiency",
+        "esc_continuous_current_a",
+    )
+    missing = tuple(
+        name for name in required
+        if parameters.get(name) is None
+    )
+    if missing:
+        return {
+            "assessed": False,
+            "feasible": False,
+            "missing_parameters": missing,
+            "motor_current_a": float("nan"),
+            "battery_current_a": float("nan"),
+            "battery_voltage_v": float("nan"),
+        }
+
+    values = {name: float(parameters[name]) for name in required}
+    if not all(np.isfinite(value) for value in values.values()):
+        raise ValueError("electrical parameters must be finite")
+    if rotor_count <= 0 or motor_rpm < 0.0:
+        raise ValueError("rotor count must be positive and motor RPM cannot be negative")
+    if (
+        values["motor_kv_rpm_per_volt"] <= 0.0
+        or values["motor_resistance_ohm"] < 0.0
+        or values["motor_no_load_current_a"] < 0.0
+        or values["motor_continuous_current_a"] <= 0.0
+        or values["propeller_torque_coefficient_nm_s2_rad2"] <= 0.0
+        or values["battery_nominal_voltage_v"] <= 0.0
+        or values["battery_internal_resistance_ohm"] < 0.0
+        or values["battery_capacity_ah"] <= 0.0
+        or values["battery_c_rating"] <= 0.0
+        or values["battery_continuous_current_a"] <= 0.0
+        or not 0.0 < values["esc_efficiency"] <= 1.0
+        or values["esc_continuous_current_a"] <= 0.0
+    ):
+        raise ValueError("electrical limits and model parameters must be physically positive")
+
+    kv = values["motor_kv_rpm_per_volt"]
+    motor_torque_constant = 60.0 / (2.0 * np.pi * kv)
+    angular_speed = motor_rpm * 2.0 * np.pi / 60.0
+    propeller_torque = (
+        values["propeller_torque_coefficient_nm_s2_rad2"] * angular_speed**2
+    )
+    motor_current = (
+        propeller_torque / motor_torque_constant
+        + values["motor_no_load_current_a"]
+    )
+    motor_voltage = (
+        motor_rpm / kv
+        + motor_current * values["motor_resistance_ohm"]
+    )
+    motor_power = motor_voltage * motor_current
+    battery_power = rotor_count * motor_power / values["esc_efficiency"]
+    battery_resistance = values["battery_internal_resistance_ohm"]
+    nominal_voltage = values["battery_nominal_voltage_v"]
+    discriminant = nominal_voltage**2 - 4.0 * battery_resistance * battery_power
+    if discriminant < 0.0:
+        battery_current = float("inf")
+        battery_voltage = 0.0
+    elif battery_resistance == 0.0:
+        battery_current = battery_power / nominal_voltage
+        battery_voltage = nominal_voltage
+    else:
+        battery_current = (
+            nominal_voltage - np.sqrt(discriminant)
+        ) / (2.0 * battery_resistance)
+        battery_voltage = nominal_voltage - battery_current * battery_resistance
+
+    battery_current_limit = min(
+        values["battery_capacity_ah"] * values["battery_c_rating"],
+        values["battery_continuous_current_a"],
+    )
+    feasible = bool(
+        motor_current <= values["motor_continuous_current_a"]
+        and motor_current <= values["esc_continuous_current_a"]
+        and battery_current <= battery_current_limit
+        and motor_voltage <= battery_voltage
+    )
+    return {
+        "assessed": True,
+        "feasible": feasible,
+        "missing_parameters": (),
+        "motor_current_a": float(motor_current),
+        "battery_current_a": float(battery_current),
+        "battery_voltage_v": float(battery_voltage),
+    }
+
+
+def constrained_transition_corridor(
+    dynamics: TiltrotorDynamics,
+    *,
+    max_thrust_per_rotor: float,
+    rotor_tilts: list[bool],
+    airspeeds_mps: list[float] | np.ndarray,
+    tilt_angles_deg: list[float] | np.ndarray,
+    max_tilt_rate_deg_s: float,
+    transition_duration_s: float,
+    gust_speed_margin_mps: float = 0.0,
+    electrical_parameters: Mapping[str, float | int | None] | None = None,
+    tail_limit_rad: float = 0.2,
+    trim_residual_tolerance: float = 0.02,
+    cl_max: float,
+    cd_0: float,
+    aspect_ratio: float,
+    oswald_efficiency: float = 0.8,
+) -> dict[str, object]:
+    """Build a grid corridor filtered by trim, static signs, gust reserve, and actuator limits.
+
+    Electrical and motor-slew constraints are fail-closed: cells are not fully
+    qualified unless the required model inputs are present and those limits pass.
+    The gust check is an airspeed reserve, not a transient gust-response proof.
+    """
+    speeds = np.asarray(airspeeds_mps, dtype=float)
+    tilts = np.asarray(tilt_angles_deg, dtype=float)
+    if (
+        speeds.ndim != 1
+        or speeds.size == 0
+        or not np.all(np.isfinite(speeds))
+        or np.any(speeds < 0.0)
+        or (speeds.size > 1 and np.any(np.diff(speeds) <= 0.0))
+    ):
+        raise ValueError("airspeeds must be a non-empty, increasing finite non-negative sequence")
+    if (
+        tilts.ndim != 1
+        or tilts.size < 2
+        or not np.all(np.isfinite(tilts))
+        or not np.allclose(tilts, np.linspace(0.0, 90.0, tilts.size))
+    ):
+        raise ValueError("tilt angles must be an increasing grid from 0 to 90 degrees")
+    if (
+        not np.isfinite(max_tilt_rate_deg_s)
+        or max_tilt_rate_deg_s <= 0.0
+        or not np.isfinite(transition_duration_s)
+        or transition_duration_s <= 0.0
+        or not np.isfinite(gust_speed_margin_mps)
+        or gust_speed_margin_mps < 0.0
+    ):
+        raise ValueError("tilt rate and transition duration must be positive; gust margin cannot be negative")
+    if dynamics.aero is None:
+        raise ValueError("constrained corridor requires an aerodynamic model")
+
+    envelope = transition_speed_envelope(
+        mass=dynamics.mass,
+        wing_area=float(dynamics.aero.wing_area),
+        max_thrust_per_rotor=max_thrust_per_rotor,
+        rotor_tilts=rotor_tilts,
+        rho=float(dynamics.aero.rho),
+        cl_max=cl_max,
+        cd_0=cd_0,
+        aspect_ratio=aspect_ratio,
+        oswald_efficiency=oswald_efficiency,
+        samples=tilts.size,
+    )
+    if not np.allclose(envelope["tilt_deg"], tilts):
+        raise ValueError("tilt grid must match the analytic envelope grid")
+
+    stability = transition_stability_map(
+        dynamics,
+        airspeeds_mps=speeds,
+        tilt_angles_rad=np.deg2rad(tilts),
+        tail_limit_rad=tail_limit_rad,
+        trim_residual_tolerance=trim_residual_tolerance,
+    )
+    speed_grid = speeds[:, np.newaxis]
+    minimum_speed = envelope["minimum_speed_mps"][np.newaxis, :]
+    maximum_speed = envelope["maximum_speed_mps"][np.newaxis, :]
+    analytic_mask = (
+        envelope["feasible"][np.newaxis, :]
+        & (speed_grid >= minimum_speed)
+        & (speed_grid <= maximum_speed)
+    )
+    gust_mask = (
+        analytic_mask
+        & (speed_grid >= minimum_speed + gust_speed_margin_mps)
+        & (speed_grid <= maximum_speed - gust_speed_margin_mps)
+    )
+    trim_mask = np.asarray(stability["trim_feasible"], dtype=bool)
+    pitch_residual = np.asarray(
+        stability["trim_pitch_moment_residual"],
+        dtype=float,
+    )
+    pitch_moment_mask = np.isfinite(pitch_residual) & (
+        np.abs(pitch_residual) <= trim_residual_tolerance
+    )
+    assessment_mask = np.asarray(stability["assessment_mask"], dtype=bool)
+    cm_alpha = np.asarray(stability["cm_alpha_per_rad"], dtype=float)
+    cl_beta = np.asarray(stability["cl_beta_per_rad"], dtype=float)
+    cn_beta = np.asarray(stability["cn_beta_per_rad"], dtype=float)
+    static_stability_mask = (
+        assessment_mask
+        & (cm_alpha < 0.0)
+        & (cl_beta < 0.0)
+        & (cn_beta > 0.0)
+    )
+    tilt_reachable = tilts <= max_tilt_rate_deg_s * transition_duration_s
+    actuator_rate_mask = np.broadcast_to(
+        tilt_reachable[np.newaxis, :],
+        analytic_mask.shape,
+    ).copy()
+    known_constraints_mask = (
+        gust_mask
+        & trim_mask
+        & pitch_moment_mask
+        & static_stability_mask
+        & actuator_rate_mask
+    )
+
+    motor_slew_rate = None if electrical_parameters is None else (
+        electrical_parameters.get("motor_slew_rate_rpm_s")
+    )
+    motor_slew_assessed = np.zeros(analytic_mask.shape, dtype=bool)
+    motor_slew_feasible = np.zeros(analytic_mask.shape, dtype=bool)
+    if motor_slew_rate is not None:
+        slew_limit = float(motor_slew_rate)
+        if not np.isfinite(slew_limit) or slew_limit <= 0.0:
+            raise ValueError("motor slew rate must be positive and finite")
+        trim_rpm = np.asarray(stability["trim_motor_rpm"], dtype=float)
+        if np.isclose(speeds[0], 0.0):
+            initial_rpm = trim_rpm[0, 0]
+            initial_trim_feasible = bool(trim_mask[0, 0])
+        else:
+            hover_trim = solve_longitudinal_trim(
+                dynamics,
+                0.0,
+                0.0,
+                tail_limit_rad=tail_limit_rad,
+                residual_tolerance=trim_residual_tolerance,
+            )
+            initial_rpm = float(hover_trim["motor_rpm"])
+            initial_trim_feasible = bool(hover_trim["feasible"])
+        if initial_trim_feasible and np.isfinite(initial_rpm):
+            motor_slew_assessed = (
+                analytic_mask
+                & trim_mask
+                & pitch_moment_mask
+                & np.isfinite(trim_rpm)
+            )
+            required_average_slew = np.abs(trim_rpm - initial_rpm) / transition_duration_s
+            motor_slew_feasible = motor_slew_assessed & (
+                required_average_slew <= slew_limit
+            )
+
+    electrical_assessed = np.zeros(analytic_mask.shape, dtype=bool)
+    electrical_feasible = np.zeros(analytic_mask.shape, dtype=bool)
+    electrical_missing: tuple[str, ...] = ()
+    if electrical_parameters is not None:
+        electrical_missing = tuple(
+            assess_motor_electrical_point(
+                0.0,
+                len(rotor_tilts),
+                electrical_parameters,
+            )["missing_parameters"]
+        )
+        trim_rpm = np.asarray(stability["trim_motor_rpm"], dtype=float)
+        for index in np.ndindex(analytic_mask.shape):
+            if (
+                not analytic_mask[index]
+                or not trim_mask[index]
+                or not pitch_moment_mask[index]
+                or not np.isfinite(trim_rpm[index])
+            ):
+                continue
+            point = assess_motor_electrical_point(
+                float(trim_rpm[index]),
+                len(rotor_tilts),
+                electrical_parameters,
+            )
+            electrical_assessed[index] = bool(point["assessed"])
+            electrical_feasible[index] = bool(point["feasible"])
+
+    qualified_mask = (
+        known_constraints_mask
+        & motor_slew_assessed
+        & motor_slew_feasible
+        & electrical_assessed
+        & electrical_feasible
+    )
+    return {
+        "airspeeds_mps": speeds.copy(),
+        "tilt_angles_deg": tilts.copy(),
+        "analytic_envelope": envelope,
+        "stability_map": stability,
+        "analytic_mask": analytic_mask,
+        "gust_mask": gust_mask,
+        "trim_mask": trim_mask,
+        "pitch_moment_mask": pitch_moment_mask,
+        "static_stability_mask": static_stability_mask,
+        "actuator_rate_mask": actuator_rate_mask,
+        "known_constraints_mask": known_constraints_mask,
+        "motor_slew_assessed_mask": motor_slew_assessed,
+        "motor_slew_feasible_mask": motor_slew_feasible,
+        "electrical_assessed_mask": electrical_assessed,
+        "electrical_feasible_mask": electrical_feasible,
+        "electrical_missing_parameters": electrical_missing,
+        "qualified_mask": qualified_mask,
     }
