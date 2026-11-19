@@ -1,6 +1,6 @@
 ﻿
 # Cache Buster: 2026-11-11-00-37-15
-"""KADA UAM Aircraft Transition FlightConfigurator"""
+"""KADA UAM Transition phase configurators _kONKUK"""
 from collections.abc import Mapping
 
 import streamlit as st
@@ -11,6 +11,7 @@ import sys
 import os
 import hashlib
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ==========================================================
 # 1. FIX PATH FIRST (Crucial for Streamlit Cloud)
@@ -56,12 +57,21 @@ from src.configuration.aircraft_profile_excel import (
     load_aircraft_profile_excel,
     serialize_aircraft_profile_excel,
 )
-from src.configuration.aircraft_profile_preview import build_aircraft_profile_figure
+from src.configuration.px4_sitl_mapping import (
+    build_px4_sitl_mapping,
+    serialize_px4_sitl_mapping,
+)
+from src.configuration.aircraft_profile_preview import (
+    build_aircraft_profile_figure,
+    build_transition_reference_animation,
+)
 from src.wind.gust import DiscreteGust as FiniteDurationGust, DrydenGust
 from src.simulation.failures import ACTUATOR_CHANNELS
 from src.simulation.monte_carlo import MonteCarloValidator
+from src.simulation.report import ReportItem, SimulationReport
+from src.simulation.transition_targets import assess_transition_targets
 
-st.set_page_config(page_title="Tilt-rotor systems dashboard", layout="wide")
+st.set_page_config(page_title="KADA UAM Transition phase configurators _kONKUK", layout="wide")
 
 # ==========================================================
 # 3. LOAD CONFIG
@@ -138,7 +148,7 @@ GUST_DIRECTION_VECTORS = {
     "Diagonal": np.array([1.0, 1.0, -1.0]) / np.sqrt(3.0),
 }
 
-st.title("KADA UAM Aircraft Transition FlightConfigurator")
+st.title("KADA UAM Transition phase configurators _kONKUK")
 
 
 st.sidebar.title("Aircraft and mission setup")
@@ -229,7 +239,7 @@ with side_tabs[2]:
         "Height (m)", min_value=0.01, step=0.01, key="fuselage_height_m"
     )
 
-    st.markdown("**Wing Planform (XFLR5 Style)**")
+    st.markdown("**Wing Planform**")
     c1, c2 = st.columns(2)
     root_x = c1.number_input("Root LE X (m)", step=0.05, key="wing_root_le_x_m")
     root_y = c2.number_input("Root Y (m)", step=0.05, key="wing_root_y_m")
@@ -252,8 +262,8 @@ with side_tabs[2]:
     
     st.markdown("**Shared rotor tilt axis location (X/Z plane, m)**")
     pivot_col1, pivot_col2 = st.columns(2)
-    pivot_col1.number_input("Pivot X", step=0.05, key="motor_tilt_pivot_x_m")
-    pivot_col2.number_input(
+    tilt_pivot_x = pivot_col1.number_input("Pivot X", step=0.05, key="motor_tilt_pivot_x_m")
+    tilt_pivot_z = pivot_col2.number_input(
         "Pivot Z (down positive)", step=0.05, key="motor_tilt_pivot_z_m"
     )
 
@@ -518,17 +528,118 @@ with st.sidebar.expander("Aircraft profile export"):
         key="download_aircraft_profile_template",
     )
     st.caption(
-        "PX4 / MAVLink is profile metadata only. No autopilot connection or actuator command "
-        "path is implemented."
+        "The PX4 integration below exports SITL mapping metadata only. No autopilot connection "
+        "or actuator command path is implemented."
     )
 
-st.markdown("---")
-st.subheader("3D aircraft profile preview")
-st.caption(
-    "This live preview uses the active profile and current geometry controls, including for "
-    "aircraft the simulator cannot run. Inputs use X-forward, Y-right, Z-down coordinates; "
-    "the view displays Z-up. The fuselage is centered at the origin, and lifting-surface "
-    "thickness and V-tail taper are schematic."
+with st.sidebar.expander("PX4 SITL mapping (not for upload)"):
+    st.warning(
+        "This JSON is a mapping scaffold, not a PX4 parameter file. It cannot be flashed "
+        "to Pixhawk."
+    )
+    px4_version = st.text_input(
+        "PX4 release",
+        value="unknown",
+        key="px4_mapping_version",
+        help="Enter the exact release when selected; parameter names are not generated here.",
+    )
+    px4_flight_controller = st.text_input(
+        "Flight-controller board",
+        value="unknown",
+        key="px4_mapping_flight_controller",
+    )
+    tilt_arrangement_labels = {
+        "Unspecified": "UNSPECIFIED",
+        "One shared servo drives the tilting rotors": "SHARED_SERVO",
+        "Independent servos drive the tilting rotors": "INDEPENDENT_SERVOS",
+    }
+    tilt_arrangement_label = st.selectbox(
+        "Tilt-servo arrangement",
+        list(tilt_arrangement_labels),
+        key="px4_tilt_servo_arrangement",
+    )
+    aircraft_profile = export_profile.get("aircraft", {})
+    profile_geometry = (
+        aircraft_profile.get("geometry", {})
+        if isinstance(aircraft_profile, Mapping)
+        else {}
+    )
+    profile_rotors = (
+        profile_geometry.get("rotors")
+        if isinstance(profile_geometry, Mapping)
+        else None
+    )
+    if not isinstance(profile_rotors, list) or not profile_rotors:
+        st.info("Add rotor geometry to the aircraft profile before creating a PX4 mapping.")
+    else:
+        motor_directions = {}
+        st.caption(
+            "Rotor spin directions are placeholders until verified against the actual motors."
+        )
+        for index, rotor in enumerate(profile_rotors):
+            rotor_id = (
+                str(rotor.get("id", f"rotor_{index + 1}"))
+                if isinstance(rotor, Mapping)
+                else f"rotor_{index + 1}"
+            )
+            motor_directions[rotor_id] = st.selectbox(
+                f"{rotor_id} rotation",
+                ["UNVERIFIED", "CW", "CCW"],
+                key=f"px4_motor_direction_{index}_{rotor_id}",
+            )
+        px4_mapping_options = {
+            "px4_version": px4_version,
+            "flight_controller": px4_flight_controller,
+            "motor_directions": motor_directions,
+            "tilt_servo_arrangement": tilt_arrangement_labels[tilt_arrangement_label],
+        }
+        try:
+            px4_mapping = build_px4_sitl_mapping(export_profile, **px4_mapping_options)
+            px4_mapping_json = serialize_px4_sitl_mapping(
+                export_profile,
+                **px4_mapping_options,
+            )
+        except ValueError as exc:
+            st.error(f"Cannot create PX4 SITL mapping: {exc}")
+        else:
+            st.caption(
+                f"{len(px4_mapping['unresolved_before_hardware_configuration'])} unresolved "
+                "items are recorded in the export. Physical output assignments remain unassigned."
+            )
+            st.download_button(
+                "Download PX4 SITL mapping JSON (not for upload)",
+                data=px4_mapping_json,
+                file_name="px4_sitl_mapping_NOT_FOR_UPLOAD.json",
+                mime="application/json",
+                key="download_px4_sitl_mapping",
+            )
+            with st.expander("Unresolved hardware and validation items"):
+                for item in px4_mapping["unresolved_before_hardware_configuration"]:
+                    st.markdown(f"- {item}")
+                st.markdown("**PX4 references**")
+                st.markdown(
+                    f"- [Actuator setup]({px4_mapping['documentation']['px4_actuator_setup']})"
+                )
+                st.markdown(
+                    f"- [Tiltrotor VTOL]({px4_mapping['documentation']['px4_tiltrotor_vtol']})"
+                )
+
+with st.sidebar.expander("Simulation report"):
+    st.caption(
+        "Generate Word and PDF reports with the current simulation, dashboard graphs, "
+        "constrained corridor, stability map, and configured Monte Carlo trials. "
+        "Generation may take several minutes and requires Chrome or Chromium for Plotly graphs."
+    )
+    generate_report = st.button("Generate full simulation report", key="generate_full_report")
+    report_downloads = st.container()
+if generate_report and "full_simulation_report" in st.session_state:
+    del st.session_state["full_simulation_report"]
+report = SimulationReport(generate_report)
+
+report.text("markdown", st, "---")
+report.text("subheader", st, "3D aircraft profile preview")
+report.text("caption", st,
+    " preview "
 )
 profile_preview_tilt_deg = st.slider(
     "Preview rotor tilt angle (deg)",
@@ -543,21 +654,42 @@ profile_preview_figure = build_aircraft_profile_figure(
     dashboard_profile_values,
     profile_preview_tilt_deg,
 )
-st.plotly_chart(
+report.plotly_chart(st,
     profile_preview_figure,
     width="stretch",
     alt=f"3D profile preview of {active_profile['metadata']['name']} with configured lifting surfaces and rotors",
     key="aircraft_profile_preview",
 )
 
+if st.checkbox("Show reference-only transition animation", key="show_transition_reference"):
+    st.warning(
+        "REFERENCE ONLY: This schematic shows a predefined 0–90° tilt command, "
+        "not simulated aircraft motion or evidence of a safe transition. It does "
+        "not apply actuator-rate, aerodynamic, or other physical limits. "
+        "Simulation results and warnings below remain unchanged."
+    )
+    st.caption(
+        "Play or drag the time slider to inspect the timed reference. The airframe "
+        "does not move; only rotors marked as tilting rotate. This animation is "
+        "not included in simulation reports."
+    )
+    st.plotly_chart(
+        build_transition_reference_animation(
+            active_profile["metadata"]["name"], dashboard_profile_values
+        ),
+        width="stretch",
+        alt="Reference-only schematic animation of a 0 to 90 degree rotor tilt command, not simulated flight",
+        key="transition_reference_animation",
+    )
+
 profile_compatibility_issues = simulation_compatibility_issues(export_profile)
 if profile_compatibility_issues:
-    st.error(
+    report.text("error", st,
         "This aircraft profile can be inspected and exported, but the current simulation "
         "adapter cannot run it."
     )
     for issue in profile_compatibility_issues:
-        st.write(f"- {issue}")
+        report.text("write", st, f"- {issue}")
     st.stop()
 
 # Map gust settings to the wind variables expected by run_simulation
@@ -568,7 +700,7 @@ wind_turbulence = gust_duration   # (see note below)
 surface_roughness = gust_dir      # (see note below)
 
 @st.cache_data
-def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, hover_rate_scale, cruise_rate_scale, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows, gust_model="Finite-duration gust", dryden_sigma_mps=(2.5, 2.5, 1.5), dryden_tau_s=1.0, dryden_seed=0, enable_envelope_protection=True, observer_time_constant_s=0.25, max_alpha_deg=15.0, max_pitch_deg=60.0, max_body_rate_deg_s=180.0, speed_margin_mps=0.5, actuator_failure=None):
+def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, battery_cells, battery_mah, battery_c_rating, motor_kv, prop_dia, prop_pitch, num_blades, k_thrust, max_omega, wing_area, vtail_area, vtail_arm, root_x, root_c, tip_c, wingspan, sweep, motor_positions, alt_kp, alt_ki, alt_kd, spd_kp, spd_ki, spd_kd, att_kp, att_ki, att_kd, rate_kp, rate_ki, rate_kd, hover_rate_scale, cruise_rate_scale, gust_enabled, gust_start, gust_duration, gust_mag, gust_dir, max_tilt_rate_deg_s, flight_plan, mission_mode, manual_altitude, manual_speed, manual_tilt_deg, waypoint_rows, gust_model="Finite-duration gust", dryden_sigma_mps=(2.5, 2.5, 1.5), dryden_tau_s=1.0, dryden_seed=0, enable_envelope_protection=True, observer_time_constant_s=0.25, max_alpha_deg=15.0, max_pitch_deg=60.0, max_body_rate_deg_s=180.0, speed_margin_mps=0.5, actuator_failure=None, tilt_pivot_xz=(0.1, 0.0)):
     dt, duration = 0.01, 63.0
     
     rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
@@ -590,6 +722,7 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
     props.sweep_deg = sweep
     props.le_root_x = root_x
     props.motor_positions = [list(position) for position in motor_positions]
+    props.tilt_pivot_xz = tilt_pivot_xz
     props.mac, props.ac_wing_x = props._calculate_mac_and_ac()
     props.neutral_point_x = props._calculate_neutral_point()
     
@@ -631,6 +764,7 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         k_thrust=k_thrust,
         max_omega=max_omega,
         motor_positions=motor_positions,
+        tilt_pivot_xz=tilt_pivot_xz,
         vtail_model=vtail,
         aero_model=aero,
         altitude_gains={"kp": alt_kp, "ki": alt_ki, "kd": alt_kd},
@@ -818,14 +952,18 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["envelope_within"].append(bool(inside_envelope))
         
         # --- LIFT HANDOFF LOGGING ---
-        total_thrust = sum(
+        rotor_thrusts = [
             rotor.compute_thrust(omega, height_above_ground)
             for omega in (cmd["omega_fl"], cmd["omega_fr"], cmd["omega_rl"], cmd["omega_rr"])
-        )
+        ]
+        total_thrust = sum(rotor_thrusts)
+        sorted_rotors = sorted(motor_positions, key=lambda position: (-position[0], position[1]))
         
         breakdown = compute_lift_breakdown(
             state, state.tilt, V_T_current, alpha_current, total_thrust,
-            wing_area, mass, prop_radius=prop_dia * 0.0254 / 2.0
+            wing_area, mass, prop_radius=prop_dia * 0.0254 / 2.0,
+            rotor_thrusts=rotor_thrusts,
+            rotor_tilts=[bool(position[3]) for position in sorted_rotors],
         )
         log["rotor_lift"].append(breakdown["rotor_thrust"])
         log["wing_lift"].append(breakdown["wing_lift"])
@@ -919,10 +1057,10 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         )
         log["allocation_saturated"].append(cmd["allocation_saturated"])
         
-        if state.vel[0] > 2.0 and state.drag > 0.1:
+        if state.V_T >= 0.5 and state.drag > 1e-9:
             ld = state.lift / state.drag
         else:
-            ld = 0.0
+            ld = np.nan
         log["ld_ratio"].append(ld)
         
         total_current = (cmd["omega_fl"] + cmd["omega_fr"] + cmd["omega_rl"] + cmd["omega_rr"]) / motor_kv
@@ -984,6 +1122,7 @@ simulation_parameters = {
     "wingspan": 2.0 * tip_y,
     "sweep": sweep,
     "motor_positions": tuple(tuple(position) for position in motor_positions),
+    "tilt_pivot_xz": (tilt_pivot_x, tilt_pivot_z),
     "alt_kp": alt_kp,
     "alt_ki": alt_ki,
     "alt_kd": alt_kd,
@@ -1026,32 +1165,32 @@ simulation_parameters = {
 with st.spinner("Running simulation..."):
     data, gust_info = run_simulation(**simulation_parameters)
 if data["t"].size == 0:
-    st.error("The simulation ended before producing a valid flight sample.")
+    report.text("error", st, "The simulation ended before producing a valid flight sample.")
     st.stop()
 
 if gust_info["wind_model"] == "Dryden turbulence":
-    st.info(
+    report.text("info", st,
         "Wind model: seeded Dryden-like turbulence "
         f"(σ={gust_info['gust_sigma_mps'][0]:.1f}/{gust_info['gust_sigma_mps'][1]:.1f}/"
         f"{gust_info['gust_sigma_mps'][2]:.1f} m/s; τ={dryden_tau_s:.1f} s)."
     )
 elif wind_enabled and gust_info["mag"] > 0.0:
-    st.info(
+    report.text("info", st,
         f"Wind event: {gust_info['dir']} at {gust_info['mag']:.1f} m/s, "
         f"starting at t={gust_info['start']:.1f}s for {gust_info['dur']:.1f}s."
     )
 
 col1, col2, col3, col4 = st.columns(4)
 max_altitude_deviation = float(np.max(np.maximum(data["ref_alt"] - data["alt"], 0.0)))
-col1.metric("Max altitude shortfall", f"{max_altitude_deviation:.2f} m")
-col2.metric("Max Pitch", f"{np.max(np.abs(data['pitch'])):.2f} deg")
-col3.metric("Peak Gust", f"{np.max(data['wind']):.2f} m/s")
-col4.metric("Final Alt", f"{data['alt'][-1]:.1f} m")
+report.metric(col1, "Max altitude shortfall", f"{max_altitude_deviation:.2f} m")
+report.metric(col2, "Max Pitch", f"{np.max(np.abs(data['pitch'])):.2f} deg")
+report.metric(col3, "Peak Gust", f"{np.max(data['wind']):.2f} m/s")
+report.metric(col4, "Final Alt", f"{data['alt'][-1]:.1f} m")
 
 mode_col, plan_col, phase_col, route_col, duration_col = st.columns(5)
-mode_col.metric("Mission mode", gust_info["mode"])
-plan_col.metric("Flight plan", gust_info["plan"])
-phase_col.metric("Current phase", str(data["phase"][-1]))
+report.metric(mode_col, "Mission mode", gust_info["mode"])
+report.metric(plan_col, "Flight plan", gust_info["plan"])
+report.metric(phase_col, "Current phase", str(data["phase"][-1]))
 if mission_mode != "AUTO":
     route_status = mission_mode.title()
 elif flight_plan == "Waypoint route":
@@ -1060,15 +1199,15 @@ elif flight_plan == "Waypoint route":
     )
 else:
     route_status = "Timed"
-route_col.metric("Route status", route_status)
-duration_col.metric("Simulated duration", f"{gust_info['elapsed_time']:.2f} s")
+report.metric(route_col, "Route status", route_status)
+report.metric(duration_col, "Simulated duration", f"{gust_info['elapsed_time']:.2f} s")
 if gust_info["termination_reason"] != "Mission duration completed":
-    st.warning(
+    report.text("warning", st,
         f"Simulation stopped at t={gust_info['elapsed_time']:.2f} s: "
         f"{gust_info['termination_reason']}."
     )
 
-st.markdown("---")
+report.text("markdown", st, "---")
 
 fig, axes = plt.subplots(4, 2, figsize=(16, 18))
 
@@ -1090,6 +1229,37 @@ mission_phases = (
     else []
 )
 
+if show_transition_window:
+    report.text("subheader", st, "Requested transition target assessment")
+    target_rows = assess_transition_targets(
+        data,
+        transition_start_s=mission.hover_time,
+        transition_end_s=mission.total_time,
+    )
+    report.dataframe(
+        st,
+        pd.DataFrame(target_rows),
+        hide_index=True,
+        alt="Requested transition targets and measured simulation outcomes",
+    )
+    report.text(
+        "caption", st,
+        "Simulation targets ",
+    )
+    report.text(
+        "warning", st,
+        "Static margin is not verified: center of gravity and aerodynamic data are "
+        "unconfirmed. The roll and yaw tolerances and gust recovery criteria have not "
+        "been specified; no flight-safety claim is made.",
+    )
+    if not gust_enabled:
+        report.text("caption", st, "No-gust run. Gust testing remains available in the Gust tab.")
+    else:
+        report.text(
+            "caption", st,
+            "Gusts are enabled; recovery is not qualified without agreed gust and settling criteria.",
+        )
+
 def add_phase_background(ax):
     for (name, start, dur, *_), color in zip(mission_phases, phase_colors):
         ax.axvspan(start, start + dur, alpha=0.15, color=color)
@@ -1108,6 +1278,7 @@ axes[0, 0].legend()
 # 2. Pitch
 axes[0, 1].plot(data["t"], data["pitch"], 'r-', linewidth=2, label="Actual")
 axes[0, 1].plot(data["t"], data["desired_pitch"], 'k--', linewidth=1.5, label="Desired")
+axes[0, 1].axhspan(2.0, 2.8, color='green', alpha=0.15, label="Target after settling")
 add_phase_background(axes[0, 1])
 axes[0, 1].set_title("Pitch")
 axes[0, 1].set_ylabel("Pitch angle (deg)")
@@ -1147,7 +1318,7 @@ axes[2, 1].grid(True)
 # 7. L/D Ratio
 axes[3, 0].plot(data["t"], data["ld_ratio"], 'teal', linewidth=2)
 add_phase_background(axes[3, 0])
-axes[3, 0].set_title("L/D Ratio")
+axes[3, 0].set_title("Wing L/D estimate")
 axes[3, 0].set_ylabel("Lift-to-drag ratio (dimensionless)")
 axes[3, 0].grid(True)
 
@@ -1171,7 +1342,7 @@ for ax in axes[0, :]:
             ax.axvline(boundary, color='gray', linestyle=':', alpha=0.5)
 
 plt.tight_layout()
-st.pyplot(
+report.pyplot(st,
     fig,
     alt=(
         "Transition altitude, attitude, wind, rotor tilt, lift-to-drag ratio, and "
@@ -1181,6 +1352,11 @@ st.pyplot(
         "motor-speed/KV proxy"
     ),
 )
+report.text(
+    "caption", st,
+    "Wing L/D is unassessed when airspeed or drag is too small; it is not forced "
+    "to zero in hover or to a maximum at 90° tilt.",
+)
 if show_transition_window:
     if transition_times.size:
         completion_note = (
@@ -1189,26 +1365,125 @@ if show_transition_window:
             if transition_end_s < mission.total_time
             else ""
         )
-        st.caption(
+        report.text("caption", st,
             f"Showing recorded transition data only: {transition_start_s:.1f}–"
             f"{transition_end_s:.1f} s.{completion_note}"
         )
     else:
-        st.caption(
+        report.text("caption", st,
             f"No transition samples were recorded. Showing the planned transition "
             f"window: {mission.hover_time:.1f}–{mission.total_time:.1f} s."
         )
-st.caption(
+report.text("caption", st,
     "The plotted motor-speed/KV value is a proxy, not an electrical current estimate; "
     "the model does not include motor resistance or battery current dynamics."
 )
 
-st.markdown("---")
-st.subheader("6-DOF equations and response")
-st.caption(
+report.text("subheader", st, "Transition time histories")
+report.text(
+    "caption", st,
+    "These are recorded transition samples and mission targets, not verified safety "
+    "corridor boundaries. The simulated transition may end early.",
+)
+transition_mask = np.asarray(data["phase"]) == "TRANSITION"
+if np.any(transition_mask):
+    transition_time_frame = pd.DataFrame({
+        "time_s": data["t"][transition_mask],
+        "Altitude (m)": data["alt"][transition_mask],
+        "Altitude target (m)": data["ref_alt"][transition_mask],
+        "Horizontal airspeed (m/s)": data["airspeed_mps"][transition_mask],
+        "Target speed (m/s)": data["ref_speed"][transition_mask],
+        "Actual tilt (deg)": data["tilt"][transition_mask],
+        "Tilt command (deg)": data["tilt_cmd"][transition_mask],
+    })
+    
+    report.line_chart(
+        st,
+        transition_time_frame,
+        x="time_s",
+        y=["Altitude (m)", "Altitude target (m)"],
+        x_label="Mission time (s)",
+        y_label="Altitude (m, positive up)",
+        alt="Transition altitude and altitude target versus mission time",
+    )
+    report.line_chart(
+        st,
+        transition_time_frame,
+        x="time_s",
+        y=["Horizontal airspeed (m/s)", "Target speed (m/s)"],
+        x_label="Mission time (s)",
+        y_label="Horizontal airspeed and target speed (m/s)",
+        alt="Transition horizontal airspeed and target speed versus mission time",
+    )
+    report.line_chart(
+        st,
+        transition_time_frame,
+        x="time_s",
+        y=["Actual tilt (deg)", "Tilt command (deg)"],
+        x_label="Mission time (s)",
+        y_label="Nacelle tilt (deg)",
+        alt="Transition actual and commanded tilt versus mission time",
+    )
+    transition_speeds = data["V_T"][transition_mask]
+    transition_tilts = data["tilt"][transition_mask]
+    transition_sample_times = data["t"][transition_mask]
+    tilt_speed_figure = go.Figure()
+    tilt_speed_figure.add_trace(go.Scatter(
+        x=transition_speeds,
+        y=transition_tilts,
+        customdata=transition_sample_times,
+        mode="lines",
+        line=dict(color="darkorange", width=3),
+        name="Recorded transition",
+        hovertemplate=(
+            "True airspeed: %{x:.2f} m/s<br>Tilt: %{y:.2f}°"
+            "<br>Time: %{customdata:.2f} s<extra></extra>"
+        ),
+    ))
+    for index, label, color in ((0, "Start", "green"), (-1, "Last recorded sample", "red")):
+        tilt_speed_figure.add_trace(go.Scatter(
+            x=[transition_speeds[index]],
+            y=[transition_tilts[index]],
+            customdata=[transition_sample_times[index]],
+            mode="markers",
+            marker=dict(color=color, size=9),
+            name=label,
+            hovertemplate=(
+                f"{label}<br>True airspeed: %{{x:.2f}} m/s<br>"
+                "Tilt: %{y:.2f}°<br>Time: %{customdata:.2f} s<extra></extra>"
+            ),
+        ))
+    tilt_speed_figure.update_layout(
+        title="Recorded nacelle tilt versus true airspeed",
+        xaxis_title="True airspeed (m/s)",
+        yaxis_title="Nacelle tilt (deg)",
+        yaxis_range=[0, 90],
+        legend=dict(orientation="h"),
+        height=440,
+    )
+    report.plotly_chart(
+        st,
+        tilt_speed_figure,
+        width="stretch",
+        alt="Recorded transition nacelle tilt versus true airspeed in time order",
+        key="transition_tilt_versus_airspeed",
+    )
+    report.text(
+        "caption", st,
+        "This curve connects recorded transition samples in time order, including any "
+        "speed reversals. The last marker is not a completion indicator; stopped runs "
+        "remain incomplete. True airspeed is relative to the surrounding air. This "
+        "curve is not a verified safe transition corridor.",
+    )
+else:
+    report.text("info", st, "No transition-phase samples were recorded in this simulation.")
+
+report.text("markdown", st, "---")
+report.text("subheader", st, "6-DOF equations and response")
+report.text("caption", st,
     "Position and velocity are NED (north-east-down); forces and angular rates are FRD body-frame quantities."
 )
-st.markdown(
+report.text("markdown", st,
     r"""
 $$
 \dot{\mathbf p}_{NED}=\mathbf v_{NED}, \qquad
@@ -1234,7 +1509,7 @@ with kinematics_tab:
         "East (m)": data["east"],
         "Down (m)": data["down"],
     })
-    position_col.line_chart(
+    report.line_chart(position_col,
         position_data,
         x="time_s",
         y=["North (m)", "East (m)", "Down (m)"],
@@ -1248,7 +1523,7 @@ with kinematics_tab:
         "East (m/s)": data["vel_east"],
         "Down (m/s)": data["vel_down"],
     })
-    velocity_col.line_chart(
+    report.line_chart(velocity_col,
         velocity_data,
         x="time_s",
         y=["North (m/s)", "East (m/s)", "Down (m/s)"],
@@ -1265,7 +1540,7 @@ with force_tab:
         "Right Y (N)": data["force_y_body"],
         "Down Z (N)": data["force_z_body"],
     })
-    force_col.line_chart(
+    report.line_chart(force_col,
         force_data,
         x="time_s",
         y=["Forward X (N)", "Right Y (N)", "Down Z (N)"],
@@ -1279,7 +1554,7 @@ with force_tab:
         "East (m/s²)": data["accel_east"],
         "Down (m/s²)": data["accel_down"],
     })
-    acceleration_col.line_chart(
+    report.line_chart(acceleration_col,
         acceleration_data,
         x="time_s",
         y=["North (m/s²)", "East (m/s²)", "Down (m/s²)"],
@@ -1296,7 +1571,7 @@ with moment_tab:
         "q (rad/s)": data["body_q"],
         "r (rad/s)": data["body_r"],
     })
-    rate_col.line_chart(
+    report.line_chart(rate_col,
         rate_data,
         x="time_s",
         y=["p (rad/s)", "q (rad/s)", "r (rad/s)"],
@@ -1310,7 +1585,7 @@ with moment_tab:
         "Pitch M (N·m)": data["moment_m_body"],
         "Yaw N (N·m)": data["moment_n_body"],
     })
-    moment_col.line_chart(
+    report.line_chart(moment_col,
         moment_data,
         x="time_s",
         y=["Roll L (N·m)", "Pitch M (N·m)", "Yaw N (N·m)"],
@@ -1324,7 +1599,7 @@ with moment_tab:
         "q-dot (rad/s²)": data["angular_accel_q"],
         "r-dot (rad/s²)": data["angular_accel_r"],
     })
-    st.line_chart(
+    report.line_chart(st,
         angular_acceleration_data,
         x="time_s",
         y=["p-dot (rad/s²)", "q-dot (rad/s²)", "r-dot (rad/s²)"],
@@ -1335,26 +1610,26 @@ with moment_tab:
 
 # Mission phase legend
 if mission_phases:
-    st.markdown("**Timed mission phases**")
+    report.text("markdown", st, "**Timed mission phases**")
     cols = st.columns(len(mission_phases))
     for i, (name, start, dur) in enumerate(mission_phases):
-        cols[i].metric(name.title(), f"{start:.0f}–{start + dur:.0f} s")
+        report.metric(cols[i], name.title(), f"{start:.0f}–{start + dur:.0f} s")
 
-st.markdown("---")
-st.subheader("Guidance, control allocation, and mission")
-st.caption(
+report.text("markdown", st, "---")
+report.text("subheader", st, "Guidance, control allocation, and mission")
+report.text("caption", st,
     "The charts show the guidance references and the four motor/V-tail commands applied by the cascade controller."
 )
 
 tracking_col, mission_col = st.columns(2)
 with tracking_col:
-    st.markdown("**Flight-path tracking**")
+    report.text("markdown", st, "**Flight-path tracking**")
     altitude_data = pd.DataFrame({
         "time_s": data["t"],
         "Altitude (m)": data["alt"],
         "Altitude target (m)": data["ref_alt"],
     })
-    st.line_chart(
+    report.line_chart(st,
         altitude_data,
         x="time_s",
         y=["Altitude (m)", "Altitude target (m)"],
@@ -1367,7 +1642,7 @@ with tracking_col:
         "Horizontal airspeed (m/s)": data["airspeed_mps"],
         "Target speed (m/s)": data["ref_speed"],
     })
-    st.line_chart(
+    report.line_chart(st,
         speed_data,
         x="time_s",
         y=["Horizontal airspeed (m/s)", "Target speed (m/s)"],
@@ -1377,20 +1652,20 @@ with tracking_col:
     )
 
 with mission_col:
-    st.markdown("**Mission route and current position**")
+    report.text("markdown", st, "**Mission route and current position**")
     if flight_plan == "Waypoint route":
         route_frame = pd.DataFrame(
             waypoint_rows,
             columns=["North (m)", "East (m)", "Altitude (m)", "Speed (m/s)", "Tilt (deg)"],
         )
-        st.dataframe(route_frame, hide_index=True, alt="Configured waypoint route")
-        st.caption("The current guidance model tracks altitude and forward speed; lateral waypoint tracking is not yet modeled.")
+        report.dataframe(st, route_frame, hide_index=True, alt="Configured waypoint route")
+        report.text("caption", st, "The current guidance model tracks altitude and forward speed; lateral waypoint tracking is not yet modeled.")
         route_plot = pd.DataFrame({
             "North (m)": data["north"],
             "East (m)": data["east"],
             "Time (s)": data["t"],
         })
-        st.scatter_chart(
+        report.scatter_chart(st,
             route_plot,
             x="North (m)",
             y="East (m)",
@@ -1400,7 +1675,7 @@ with mission_col:
             alt="Aircraft position through the local north-east flight path",
         )
     else:
-        st.write(
+        report.text("write", st,
             f"Mode: **{mission_mode}**  \n"
             f"Profile: **{flight_plan}**  \n"
             f"Tilt actuator limit: **{max_tilt_rate_deg_s:.1f} deg/s**"
@@ -1408,13 +1683,13 @@ with mission_col:
 
 tilt_col, motor_col, surface_col = st.columns(3)
 with tilt_col:
-    st.markdown("**Tilt actuator tracking**")
+    report.text("markdown", st, "**Tilt actuator tracking**")
     tilt_data = pd.DataFrame({
         "time_s": data["t"],
         "Actual tilt (deg)": data["tilt"],
         "Tilt command (deg)": data["tilt_cmd"],
     })
-    st.line_chart(
+    report.line_chart(st,
         tilt_data,
         x="time_s",
         y=["Actual tilt (deg)", "Tilt command (deg)"],
@@ -1424,7 +1699,7 @@ with tilt_col:
     )
 
 with motor_col:
-    st.markdown("**Per-motor command (RPM)**")
+    report.text("markdown", st, "**Per-motor command (RPM)**")
     rad_s_to_rpm = 60.0 / (2.0 * np.pi)
     motor_data = pd.DataFrame({
         "time_s": data["t"],
@@ -1433,7 +1708,7 @@ with motor_col:
         "Rear left (RPM)": data["omega_rl"] * rad_s_to_rpm,
         "Rear right (RPM)": data["omega_rr"] * rad_s_to_rpm,
     })
-    st.line_chart(
+    report.line_chart(st,
         motor_data,
         x="time_s",
         y=[
@@ -1448,19 +1723,44 @@ with motor_col:
     )
 
 with surface_col:
-    st.markdown("**V-tail command (deg)**")
+    report.text("markdown", st, "**V-tail command (deg)**")
     surface_data = pd.DataFrame({
         "time_s": data["t"],
         "Left surface": np.rad2deg(data["delta_left"]),
         "Right surface": np.rad2deg(data["delta_right"]),
     })
-    st.line_chart(
+    report.line_chart(st,
         surface_data,
         x="time_s",
         y=["Left surface", "Right surface"],
         x_label="Time (s)",
         y_label="V-tail deflection (deg)",
         alt="Left and right V-tail control surface commands",
+    )
+
+if np.any(transition_mask):
+    fig_rpm_tilt, ax_rpm_tilt = plt.subplots(figsize=(8, 4))
+    for channel, label in (
+        ("omega_fl", "Front left"),
+        ("omega_fr", "Front right"),
+        ("omega_rl", "Rear left"),
+        ("omega_rr", "Rear right"),
+    ):
+        ax_rpm_tilt.plot(
+            data["tilt"][transition_mask],
+            data[channel][transition_mask] * rad_s_to_rpm,
+            label=label,
+            linewidth=1,
+        )
+    ax_rpm_tilt.set_xlabel("Nacelle tilt of tilting rotors (deg)")
+    ax_rpm_tilt.set_ylabel("Commanded motor speed (RPM)")
+    ax_rpm_tilt.grid(True)
+    ax_rpm_tilt.legend()
+    report.pyplot(st, fig_rpm_tilt, alt="Commanded motor speeds against nacelle tilt")
+    report.text(
+        "caption", st,
+        "These are commanded speeds, not measured motor responses. Each pair can "
+        "differ when the allocator requests moments.",
     )
     
 
@@ -1475,8 +1775,8 @@ props_plot.total_mass = mass
 # ==========================================================
 # WIND TRIANGLE VISUALIZATION
 # ==========================================================
-st.markdown("---")
-st.subheader(" Wind Triangle (Live)")
+report.text("markdown", st, "---")
+report.text("subheader", st, " Wind Triangle (Live)")
 
 c1, c2 = st.columns(2)
 
@@ -1501,7 +1801,7 @@ with c1:
     ax_wt.grid(True)
     ax_wt.legend()
     ax_wt.set_aspect('equal', adjustable='datalim')
-    st.pyplot(fig_wt, alt="Body-frame airspeed vector showing forward and vertical airspeed")
+    report.pyplot(st, fig_wt, alt="Body-frame airspeed vector showing forward and vertical airspeed")
 
 with c2:
     # Angle of Attack (alpha) over time
@@ -1511,25 +1811,27 @@ with c2:
     ax_alpha.plot(data["t"], alpha_history, 'b-', linewidth=2)
     ax_alpha.axhline(15, color='r', linestyle='--', alpha=0.5, label="Stall angle (15°)")
     ax_alpha.axhline(-15, color='r', linestyle='--', alpha=0.5)
+    ax_alpha.axhspan(5.0, 12.0, color='green', alpha=0.15, label="Requested target")
     ax_alpha.set_xlabel("Mission time (s)")
     ax_alpha.set_ylabel("Angle of Attack α (deg)")
     ax_alpha.set_title("Angle of Attack during Flight")
     ax_alpha.grid(True)
     ax_alpha.legend()
-    st.pyplot(fig_alpha, alt="Angle of attack through the flight with stall-angle references")
+    report.pyplot(st, fig_alpha, alt="Angle of attack through the flight with stall-angle references")
+    report.text("caption", st, "The 5–12° target is assessed only at airspeed ≥15 m/s.")
 
 # Show the instantaneous values
-st.markdown("**Instantaneous Wind Triangle**")
+report.text("markdown", st, "**Instantaneous Wind Triangle**")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("True Airspeed", f"{data['V_T'][-1]:.2f} m/s")
-c2.metric("u (Forward Airspeed)", f"{data['u_body'][-1]:.2f} m/s")
-c3.metric("w (Downward Airspeed)", f"{data['w_body'][-1]:.2f} m/s")
+report.metric(c1, "True Airspeed", f"{data['V_T'][-1]:.2f} m/s")
+report.metric(c2, "u (Forward Airspeed)", f"{data['u_body'][-1]:.2f} m/s")
+report.metric(c3, "w (Downward Airspeed)", f"{data['w_body'][-1]:.2f} m/s")
 alpha_now = np.rad2deg(np.arctan2(data['w_body'][-1], data['u_body'][-1])) if data['u_body'][-1] != 0 else 0
-c4.metric("Angle of Attack α", f"{alpha_now:.1f}°")
+report.metric(c4, "Angle of Attack α", f"{alpha_now:.1f}°")
 
 # GEOMETRY
-st.markdown("---")
-st.subheader(" Aircraft Geometry & Mass Properties")
+report.text("markdown", st, "---")
+report.text("subheader", st, " Aircraft Geometry & Mass Properties")
 col_geo1, col_geo2 = st.columns(2)
 
 # 1. Instantiate MassProperties
@@ -1547,6 +1849,7 @@ props.tip_chord = tip_c
 props.sweep_deg = sweep
 props.le_root_x = root_x
 props.motor_positions = motor_positions
+props.tilt_pivot_xz = (tilt_pivot_x, tilt_pivot_z)
 
 props.vtail_area = vtail_area
 props.vtail_arm = vtail_arm
@@ -1583,7 +1886,7 @@ with col_geo1:
     ax_side.set_title("Side Profile: Neutral Point & AC")
     ax_side.grid(True, alpha=0.3)
     ax_side.legend()
-    st.pyplot(fig_side, alt="Aircraft side profile showing the center of gravity, aerodynamic center, and neutral point")
+    report.pyplot(st, fig_side, alt="Aircraft side profile showing the center of gravity, aerodynamic center, and neutral point")
 
 with col_geo2:
     fig_top, ax_top = plt.subplots(figsize=(8, 4))
@@ -1600,12 +1903,16 @@ with col_geo2:
     ax_top.set_title("Top Profile (X-Y)")
     ax_top.grid(True, alpha=0.3)
     ax_top.legend()
-    st.pyplot(fig_top, alt="Aircraft top profile showing wing span, center of gravity, and motor positions")
+    report.pyplot(st, fig_top, alt="Aircraft top profile showing wing span, center of gravity, and motor positions")
     # ==========================================================
 # LIFT HANDOFF & CONTROL AUTHORITY
 # ==========================================================
-st.markdown("---")
-st.subheader("Lift Handoff & Control Authority")
+report.text("markdown", st, "---")
+report.text("subheader", st, "Lift Handoff & Control Authority")
+report.text(
+    "caption", st,
+    " ",
+)
 
 c1, c2 = st.columns(2)
 
@@ -1622,7 +1929,7 @@ with c1:
     ax_lift.set_title("Lift Sources During Transition")
     ax_lift.grid(True, alpha=0.3)
     ax_lift.legend(loc='upper right')
-    st.pyplot(fig_lift, alt="Rotor, wing, and rotor-wash contributions to vertical lift through transition")
+    report.pyplot(st, fig_lift, alt="Rotor, wing, and rotor-wash contributions to vertical lift through transition")
 
 with c2:
     # Handoff ratio
@@ -1637,11 +1944,11 @@ with c2:
     ax_ratio.set_ylim(-0.1, 1.1)
     ax_ratio.grid(True, alpha=0.3)
     ax_ratio.legend()
-    st.pyplot(fig_ratio, alt="Lift handoff ratio from rotor-dominated to wing-dominated support")
+    report.pyplot(st, fig_ratio, alt="Lift handoff ratio from rotor-dominated to wing-dominated support")
 
 # Control authority at current instant
-st.markdown("### Simplified Control Authority Estimate")
-st.caption("This pitch-authority blend is a heuristic; the model-based control-effectiveness map is in Phase 5 below.")
+report.text("markdown", st, "### Simplified Control Authority Estimate")
+report.text("caption", st, "This pitch-authority blend is a heuristic; the model-based control-effectiveness map is in Phase 5 below.")
 current_tilt = data["tilt"][-1]
 current_V_T = data["V_T"][-1]
 if current_V_T < 0.5:
@@ -1652,13 +1959,13 @@ auth = control_authority(np.deg2rad(current_tilt), current_V_T, 12.0)
 blend = control_blend(np.deg2rad(current_tilt))
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Rotor Pitch Authority", f"{auth['rotor_authority_frac']*100:.0f}%")
-c2.metric("V-Tail Pitch Authority", f"{auth['vtail_authority_frac']*100:.0f}%")
-c3.metric("Controller Blend", f"{blend*100:.0f}% (0=rotor, 100=wing)")
+report.metric(c1, "Rotor Pitch Authority", f"{auth['rotor_authority_frac']*100:.0f}%")
+report.metric(c2, "V-Tail Pitch Authority", f"{auth['vtail_authority_frac']*100:.0f}%")
+report.metric(c3, "Controller Blend", f"{blend*100:.0f}% (0=rotor, 100=wing)")
 
 # Control authority vs tilt angle (the "handoff map")
-st.markdown("### Heuristic Pitch Authority Trend")
-st.caption("Illustrative tilt trend evaluated at a fixed 12 m/s; it is not the finite-difference actuator map.")
+report.text("markdown", st, "### Heuristic Pitch Authority Trend")
+report.text("caption", st, "Illustrative tilt trend evaluated at a fixed 12 m/s; it is not the finite-difference actuator map.")
 tilt_scan = np.linspace(0, 90, 50)
 rotor_fracs = []
 vtail_fracs = []
@@ -1681,42 +1988,42 @@ ax_map.set_ylabel("Authority / Blend (%)")
 ax_map.set_title("Control Authority Handoff Map")
 ax_map.grid(True, alpha=0.3)
 ax_map.legend()
-st.pyplot(fig_map, alt="Rotor and V-tail control authority and blend versus nacelle tilt")
+report.pyplot(st, fig_map, alt="Rotor and V-tail control authority and blend versus nacelle tilt")
 
 
 # Calculate static margin percentage
 sm_pct = props.get_static_margin_pct()
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Mass", f"{props.total_mass:.2f} kg")
-c2.metric("Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m²")
-c3.metric("Static Margin", f"{sm_pct:.1f} %")
+report.metric(c1, "Total Mass", f"{props.total_mass:.2f} kg")
+report.metric(c2, "Wing Loading", f"{props.total_mass / wing_area:.1f} kg/m²")
+report.metric(c3, "Static Margin", f"{sm_pct:.1f} %")
 
 # The neutral-point calculation is a geometry estimate relative to an assumed CG origin.
 if sm_pct <= 0.0:
     c4.error("Non-positive estimate")
-    st.error(
+    report.text("error", st,
         "The simplified neutral-point estimate is non-positive relative to the assumed "
         "CG origin. This can indicate a longitudinal static-stability concern; verify the "
         "actual center of gravity and aerodynamic derivatives before drawing conclusions."
     )
 elif sm_pct > 20.0:
     c4.warning("Above the dashboard range")
-    st.warning(
+    report.text("warning", st,
         "The geometry-based static-margin estimate is above 20%. This simplified "
         "estimate alone does not establish that the aircraft is over-stable or unsafe."
     )
 else:
-    c4.metric("Positive estimate", f"{sm_pct:.1f}%")
-    st.info(
+    report.metric(c4, "Positive estimate", f"{sm_pct:.1f}%")
+    report.text("info", st,
         "A positive geometry-based static-margin estimate does not demonstrate static "
         "or dynamic stability. It assumes the CG is at the model origin; use the "
         "transition derivative map and aircraft-specific test data for further analysis."
     )
 
-st.markdown("---")
-st.subheader("3x3 Inertia Tensor & Mass Properties")
-st.markdown("This matrix describes the aircraft's resistance to rotation. Cross-coupling terms ($I_{xz}$) appear when the mass is asymmetric.")
+report.text("markdown", st, "---")
+report.text("subheader", st, "3x3 Inertia Tensor & Mass Properties")
+report.text("markdown", st, "This matrix describes the aircraft's resistance to rotation. Cross-coupling terms ($I_{xz}$) appear when the mass is asymmetric.")
 
 # Calculate the current Inertia Matrix at hover (0 deg tilt)
 current_I = props.calculate_inertia(0.0)
@@ -1726,15 +2033,15 @@ I_display = np.round(current_I, 4)
 
 # Display as columns
 c1, c2, c3 = st.columns(3)
-c1.metric("Ixx (Roll)", f"{I_display[0,0]:.4f} kg·m²")
-c2.metric("Iyy (Pitch)", f"{I_display[1,1]:.4f} kg·m²")
-c3.metric("Izz (Yaw)", f"{I_display[2,2]:.4f} kg·m²")
+report.metric(c1, "Ixx (Roll)", f"{I_display[0,0]:.4f} kg·m²")
+report.metric(c2, "Iyy (Pitch)", f"{I_display[1,1]:.4f} kg·m²")
+report.metric(c3, "Izz (Yaw)", f"{I_display[2,2]:.4f} kg·m²")
 
-st.write("Full 3x3 Matrix:")
-st.write(I_display)
+report.text("write", st, "Full 3x3 Matrix:")
+report.text("write", st, I_display)
 
 # Dynamic Inertia Visualization
-st.markdown("**Dynamic Inertia during Tilt Transition**")
+report.text("markdown", st, "**Dynamic Inertia during Tilt Transition**")
 tilt_scan = np.linspace(0, 90, 20)
 ixx_scan = []
 iyy_scan = []
@@ -1755,16 +2062,15 @@ ax_I.set_ylabel("Inertia (kg·m²)")
 ax_I.set_title("Inertia changes as motors tilt forward")
 ax_I.grid(True)
 ax_I.legend()
-st.pyplot(fig_I, alt="Roll, pitch, and yaw inertia values as nacelles tilt")
+report.pyplot(st, fig_I, alt="Roll, pitch, and yaw inertia values as nacelles tilt")
 
 # ==========================================================
 # PHASE 5: TRANSITION DYNAMICS
 # ==========================================================
-st.markdown("---")
-st.subheader("Phase 5: Transition dynamics — the bridge")
-st.caption(
-    "Analyze the tilt/speed corridor, actuator moment effectiveness, and longitudinal trim "
-    "using the configured mass, motor, wing, V-tail, and rotor layout."
+report.text("markdown", st, "---")
+report.text("subheader", st, "Phase 5: Transition dynamics — the bridge")
+report.text("caption", st,
+    " "
 )
 
 analysis_rotor = RotorModel(k_thrust=k_thrust, max_omega=max_omega)
@@ -1881,6 +2187,7 @@ with corridor_tab:
     }
     corridor_signature = hashlib.sha256(
         repr((
+            "independent_pair_trim_v1",
             dashboard_values_fingerprint,
             gust_margin_mps,
             max_tilt_rate_deg_s,
@@ -1888,7 +2195,7 @@ with corridor_tab:
             tuple(sorted(electrical_parameters.items())),
         )).encode("utf-8")
     ).hexdigest()
-    if st.button(
+    if generate_report or st.button(
         "Compute constrained corridor",
         key="compute_constrained_transition_corridor",
     ):
@@ -1921,9 +2228,20 @@ with corridor_tab:
         if corridor_record.get("signature") == corridor_signature:
             current_corridor_result = corridor_record["result"]
         else:
-            st.info(
+            report.text("info", st,
                 "Corridor inputs changed. Recompute the constrained corridor to refresh its filters."
             )
+
+    if current_corridor_result is None:
+        report.text("info", st,
+            "."
+        )
+    elif not np.any(current_corridor_result["known_constraints_mask"]):
+        report.text("warning", st,
+            "No grid cells pass the known corridor filters. Gray crosses, if shown, "
+            "pass longitudinal trim only; other constraints have failed or remain "
+            "unassessed. They are not a safe corridor."
+        )
 
     feasible = envelope["feasible"]
     fig_corridor = go.Figure()
@@ -1932,8 +2250,8 @@ with corridor_tab:
         minimum_speed = envelope["minimum_speed_mps"][feasible]
         maximum_speed = envelope["maximum_speed_mps"][feasible]
         fig_corridor.add_trace(go.Scatter(
-            x=np.concatenate([corridor_tilt, corridor_tilt[::-1]]),
-            y=np.concatenate([maximum_speed, minimum_speed[::-1]]),
+            x=np.concatenate([maximum_speed, minimum_speed[::-1]]),
+            y=np.concatenate([corridor_tilt, corridor_tilt[::-1]]),
             fill="toself",
             fillcolor="rgba(52, 152, 219, 0.18)",
             line=dict(color="rgba(52, 152, 219, 0.25)"),
@@ -1941,27 +2259,28 @@ with corridor_tab:
             hoverinfo="skip",
         ))
         fig_corridor.add_trace(go.Scatter(
-            x=corridor_tilt,
-            y=minimum_speed,
+            x=minimum_speed,
+            y=corridor_tilt,
             mode="lines",
             line=dict(color="royalblue", dash="dash"),
             name="Minimum speed",
         ))
         fig_corridor.add_trace(go.Scatter(
-            x=corridor_tilt,
-            y=maximum_speed,
+            x=maximum_speed,
+            y=corridor_tilt,
             mode="lines",
             line=dict(color="royalblue"),
             name="Maximum speed",
         ))
-    fig_corridor.add_trace(go.Scatter(
-        x=data["tilt"],
-        y=data["V_T"],
-        mode="lines+markers",
-        marker=dict(size=4),
-        line=dict(color="darkorange", width=2),
-        name="Simulated transition",
-    ))
+    if np.any(transition_mask):
+        fig_corridor.add_trace(go.Scatter(
+            x=data["V_T"][transition_mask],
+            y=data["tilt"][transition_mask],
+            mode="lines+markers",
+            marker=dict(size=4),
+            line=dict(color="darkorange", width=2),
+            name="Recorded transition",
+        ))
     if current_corridor_result is not None:
         known_mask = np.asarray(
             current_corridor_result["known_constraints_mask"],
@@ -1979,18 +2298,45 @@ with corridor_tab:
             current_corridor_result["tilt_angles_deg"],
             dtype=float,
         )
+        trim_only_mask = (
+            np.asarray(current_corridor_result["analytic_mask"], dtype=bool)
+            & np.asarray(current_corridor_result["trim_mask"], dtype=bool)
+            & np.asarray(current_corridor_result["rotor_thrust_mask"], dtype=bool)
+            & ~known_mask
+        )
+        trim_speed_indices, trim_tilt_indices = np.where(trim_only_mask)
+        if trim_speed_indices.size:
+            trim_stability = current_corridor_result["stability_map"]
+            pair_rpm = np.column_stack((
+                np.asarray(trim_stability["trim_front_motor_rpm"], dtype=float)[trim_only_mask],
+                np.asarray(trim_stability["trim_rear_motor_rpm"], dtype=float)[trim_only_mask],
+            ))
+            fig_corridor.add_trace(go.Scatter(
+                x=corridor_speeds[trim_speed_indices],
+                y=corridor_tilts[trim_tilt_indices],
+                customdata=pair_rpm,
+                mode="markers",
+                marker=dict(color="gray", size=8, symbol="x"),
+                name="Trim only; not qualified",
+                hovertemplate=(
+                    "Airspeed: %{x:.1f} m/s<br>Tilt: %{y:.0f}°"
+                    "<br>Front pair: %{customdata[0]:.0f} RPM"
+                    "<br>Rear pair: %{customdata[1]:.0f} RPM"
+                    "<br>Other constraints failed or unassessed<extra></extra>"
+                ),
+            ))
         known_speed_indices, known_tilt_indices = np.where(
             known_mask & ~qualified_mask
         )
         if known_speed_indices.size:
             fig_corridor.add_trace(go.Scatter(
-                x=corridor_tilts[known_tilt_indices],
-                y=corridor_speeds[known_speed_indices],
+                x=corridor_speeds[known_speed_indices],
+                y=corridor_tilts[known_tilt_indices],
                 mode="markers",
                 marker=dict(color="purple", size=6, symbol="circle-open"),
                 name="Known filters pass; incomplete",
                 hovertemplate=(
-                    "Tilt: %{x:.0f}°<br>Airspeed: %{y:.1f} m/s"
+                    "Airspeed: %{x:.1f} m/s<br>Tilt: %{y:.0f}°"
                     "<br>Electrical/motor-slew filters may be unresolved"
                     "<extra></extra>"
                 ),
@@ -1998,37 +2344,113 @@ with corridor_tab:
         qualified_speed_indices, qualified_tilt_indices = np.where(qualified_mask)
         if qualified_speed_indices.size:
             fig_corridor.add_trace(go.Scatter(
-                x=corridor_tilts[qualified_tilt_indices],
-                y=corridor_speeds[qualified_speed_indices],
+                x=corridor_speeds[qualified_speed_indices],
+                y=corridor_tilts[qualified_tilt_indices],
                 mode="markers",
                 marker=dict(color="green", size=7, symbol="diamond"),
                 name="All configured filters pass",
-                hovertemplate="Tilt: %{x:.0f}°<br>Airspeed: %{y:.1f} m/s<extra></extra>",
+                hovertemplate="Airspeed: %{x:.1f} m/s<br>Tilt: %{y:.0f}°<extra></extra>",
             ))
     fig_corridor.update_layout(
-        xaxis_title="Nacelle tilt (deg)",
-        yaxis_title="True airspeed (m/s)",
+        xaxis_title="True airspeed (m/s)",
+        yaxis_title="Nacelle tilt (deg)",
+        yaxis_range=[0, 90],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=20, r=20, t=30, b=20),
         height=440,
     )
-    st.plotly_chart(
+    report.plotly_chart(st,
         fig_corridor,
         width="stretch",
-        alt="Tilt versus airspeed transition corridor with analytical bounds, simulated flight path, and optional constrained grid results",
+        alt="Transition corridor with airspeed on the horizontal axis and nacelle tilt on the vertical axis",
     )
-    st.caption(
-        "The blue band is the analytical thrust/lift/drag envelope. Purple points pass the "
-        "available trim, pitch-moment, static-derivative-sign, configured gust-reserve, and "
-        "nacelle-rate screens; green points additionally pass assessed motor-slew and "
-        "electrical limits. Missing electrical or motor data are never treated as a pass. "
-        "The gust screen is an airspeed reserve, not a transient gust-response proof."
+    report.text("caption", st,
+        " "
     )
-    if current_corridor_result is None:
-        st.info(
-            "Compute the constrained grid to filter the analytical corridor with trim and stability."
-        )
-    else:
+    report.text("caption", st,
+        " "
+    )
+    report.text("markdown", st,
+        " "
+    )
+    if current_corridor_result is not None:
+        report.text("markdown", st, "**Recorded transition histories**")
+        if np.any(transition_mask):
+            transition_time = data["t"][transition_mask] - data["t"][transition_mask][0]
+            transition_alpha = np.rad2deg(np.arctan2(
+                data["w_body"][transition_mask], data["u_body"][transition_mask]
+            ))
+            alpha_assessed = (
+                (data["V_T"][transition_mask] >= 15.0)
+                & (np.hypot(data["u_body"][transition_mask], data["w_body"][transition_mask]) > 1e-6)
+            )
+            histories = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=("True airspeed", "Pitch angle", "Nacelle tilt",
+                                "Angle of attack", "Commanded motor speeds", "V-tail commands"),
+                vertical_spacing=0.16,
+            )
+            for name, values, row, col, color in (
+                ("True airspeed", data["V_T"][transition_mask], 1, 1, "royalblue"),
+                ("Pitch", data["pitch"][transition_mask], 1, 2, "firebrick"),
+                ("Actual tilt", data["tilt"][transition_mask], 1, 3, "darkorange"),
+                ("Mission tilt request", data["tilt_cmd"][transition_mask], 1, 3, "gray"),
+                ("Front left", data["omega_fl"][transition_mask] * rad_s_to_rpm, 2, 2, "royalblue"),
+                ("Front right", data["omega_fr"][transition_mask] * rad_s_to_rpm, 2, 2, "deepskyblue"),
+                ("Rear left", data["omega_rl"][transition_mask] * rad_s_to_rpm, 2, 2, "firebrick"),
+                ("Rear right", data["omega_rr"][transition_mask] * rad_s_to_rpm, 2, 2, "darkorange"),
+                ("Left V-tail", np.rad2deg(data["delta_left"][transition_mask]), 2, 3, "royalblue"),
+                ("Right V-tail", np.rad2deg(data["delta_right"][transition_mask]), 2, 3, "firebrick"),
+            ):
+                histories.add_trace(go.Scatter(
+                    x=transition_time, y=values, mode="lines", name=name,
+                    line=dict(color=color, dash="dash" if name == "Mission tilt request" else "solid"),
+                ), row=row, col=col)
+            for name, mask, color in (
+                ("AoA: target assessed", alpha_assessed, "royalblue"),
+                ("AoA: target unassessed", ~alpha_assessed, "gray"),
+            ):
+                histories.add_trace(go.Scatter(
+                    x=transition_time, y=np.where(mask, transition_alpha, np.nan),
+                    mode="lines", name=name, line=dict(color=color),
+                    connectgaps=False,
+                ), row=2, col=1)
+            histories.add_hrect(
+                y0=5.0, y1=12.0, fillcolor="green", opacity=0.15,
+                line_width=0, row=2, col=1,
+            )
+            for row, col, title in (
+                (1, 1, "Airspeed (m/s)"), (1, 2, "Pitch (deg)"),
+                (1, 3, "Tilt (deg)"), (2, 1, "Angle of attack (deg)"),
+                (2, 2, "Commanded RPM"), (2, 3, "Deflection command (deg)"),
+            ):
+                histories.update_xaxes(title_text="Transition time (s)", row=row, col=col)
+                histories.update_yaxes(title_text=title, row=row, col=col)
+            histories.update_layout(height=720, legend=dict(orientation="h"), margin=dict(t=60, b=70))
+            report.plotly_chart(
+                st, histories, width="stretch",
+                alt="Recorded transition histories for airspeed, pitch, tilt, angle of attack, motor commands and V-tail commands",
+            )
+            report.text("caption", st,
+                "The green band is the requested 5–12° angle-of-attack target, assessed "
+                "only at true airspeed ≥15 m/s. Gray segments are unassessed, not clipped "
+                "or corrected; large angles can indicate reversed or low-speed flow. "
+                "Motor speeds and V-tail deflections are commands, not measured responses. "
+                "These histories stop at the final recorded sample and are not an optimized trajectory."
+            )
+            if not np.any(alpha_assessed):
+                report.text("warning", st,
+                    "The angle-of-attack target is unassessed: this transition has no "
+                    "samples at or above 15 m/s. The displayed angles have not been "
+                    "forced into the target range."
+                )
+            elif np.any((transition_alpha[alpha_assessed] < 5.0) | (transition_alpha[alpha_assessed] > 12.0)):
+                report.text("warning", st,
+                    "The recorded angle of attack is outside the 5–12° target at one or "
+                    "more assessed samples. This plot does not correct the simulation."
+                )
+        else:
+            report.text("info", st, "No transition-phase samples were recorded for the histories.")
         analytic_count = int(np.count_nonzero(current_corridor_result["analytic_mask"]))
         known_count = int(np.count_nonzero(current_corridor_result["known_constraints_mask"]))
         qualified_count = int(np.count_nonzero(current_corridor_result["qualified_mask"]))
@@ -2058,15 +2480,19 @@ with corridor_tab:
             )
         )
         status_columns = st.columns(5)
-        status_columns[0].metric("Analytical grid cells", str(analytic_count))
-        status_columns[1].metric("Known constraints pass", str(known_count))
-        status_columns[2].metric("Electrical cells assessed", str(electrical_assessed_count))
-        status_columns[3].metric("Motor slew cells assessed", str(slew_assessed_count))
-        status_columns[4].metric("All configured filters pass", str(qualified_count))
+        report.metric(status_columns[0], "Analytical grid cells", str(analytic_count))
+        report.metric(status_columns[1], "Known constraints pass", str(known_count))
+        report.metric(status_columns[2], "Electrical cells assessed", str(electrical_assessed_count))
+        report.metric(status_columns[3], "Motor slew cells assessed", str(slew_assessed_count))
+        report.metric(status_columns[4], "All configured filters pass", str(qualified_count))
         trim_mask = np.asarray(current_corridor_result["trim_mask"], dtype=bool)
         pitch_mask = np.asarray(current_corridor_result["pitch_moment_mask"], dtype=bool)
         stability_mask = np.asarray(
             current_corridor_result["static_stability_mask"],
+            dtype=bool,
+        )
+        stability_assessed = np.asarray(
+            current_corridor_result["stability_map"]["assessment_mask"],
             dtype=bool,
         )
         gust_mask = np.asarray(current_corridor_result["gust_mask"], dtype=bool)
@@ -2089,7 +2515,7 @@ with corridor_tab:
             (
                 "Static derivative signs",
                 int(np.count_nonzero(analytic_mask & stability_mask)),
-                analytic_count,
+                int(np.count_nonzero(analytic_mask & stability_assessed)),
             ),
             (
                 "Configured gust airspeed reserve",
@@ -2105,7 +2531,7 @@ with corridor_tab:
             ("Motor RPM slew", slew_pass_count, slew_assessed_count),
             ("All configured constraints", qualified_count, analytic_count),
         ]
-        st.dataframe(
+        report.dataframe(st,
             pd.DataFrame(
                 constraint_rows,
                 columns=["Constraint", "Passing cells", "Assessed cells"],
@@ -2117,37 +2543,37 @@ with corridor_tab:
             current_corridor_result["electrical_missing_parameters"]
         )
         if missing_electrical:
-            st.warning(
+            report.text("warning", st,
                 "Electrical feasibility is not assessed; fill these profile fields with "
                 "datasheet or bench values: "
                 + ", ".join(missing_electrical)
                 + "."
             )
         if slew_assessed_count == 0:
-            st.warning(
+            report.text("warning", st,
                 "Motor RPM slew is not assessed: set propulsion.motor_dynamics.slew_rate_rpm_s "
                 "in the uploaded profile. A time constant is not treated as an equivalent hard slew limit."
             )
         if qualified_count == 0:
-            st.warning(
+            report.text("warning", st,
                 "No grid cells currently pass every configured filter. Unassessed electrical "
                 "or motor-slew limits are intentionally not counted as feasible."
             )
-        st.caption(
+        report.text("caption", st,
             f"Configured gust airspeed reserve: {gust_margin_mps:.2f} m/s; "
             f"available transition time: {transition_duration_s:.1f} s; "
             f"maximum tilt rate: {max_tilt_rate_deg_s:.1f} deg/s. "
-            "Motor RPM slew uses the average change from hover trim over the full duration, "
+            "Motor RPM slew uses the largest pair's average change from hover trim over the full duration, "
             "not a time-domain actuator simulation. The electrical estimate assumes "
             "ESC current is motor-side current and uses continuous-current limits."
         )
-        st.warning(
+        report.text("warning", st,
             "This is a simulation-only screening corridor, not a certified or flight-ready "
             "safe envelope. Static derivative signs are not dynamic-stability proof, and "
             "the aerodynamic model remains simplified."
         )
     if not np.any(feasible):
-        st.warning("No quasi-steady corridor is feasible with the current mass, wing, and propulsion settings.")
+        report.text("warning", st, "No quasi-steady corridor is feasible with the current mass, wing, and propulsion settings.")
 
 with effectiveness_tab:
     effectiveness_reference = "trim solution" if trim["feasible"] else "best-fit point"
@@ -2157,6 +2583,10 @@ with effectiveness_tab:
         tilt_rad=analysis_tilt_rad,
         alpha_rad=np.deg2rad(float(trim["alpha_deg"])),
         collective_omega=float(trim["motor_rpm"]) * 2.0 * np.pi / 60.0,
+        pair_omegas=(
+            float(trim["front_motor_rpm"]) * 2.0 * np.pi / 60.0,
+            float(trim["rear_motor_rpm"]) * 2.0 * np.pi / 60.0,
+        ),
         tail_deflection_rad=np.deg2rad(float(trim["tail_deflection_deg"])),
         tail_limit_rad=tail_limit_rad,
     )
@@ -2182,12 +2612,12 @@ with effectiveness_tab:
         margin=dict(l=20, r=20, t=30, b=130),
         height=440,
     )
-    st.plotly_chart(
+    report.plotly_chart(st,
         fig_effectiveness,
         width="stretch",
         alt="Finite-difference mapping from differential motor RPM and V-tail deflections to roll, pitch, and yaw moments",
     )
-    st.caption(
+    report.text("caption", st,
         f"Local moment changes are evaluated around the {effectiveness_reference} "
         f"({analysis_speed:.1f} m/s, {analysis_tilt_deg}°). Each rotor channel applies "
         "a ±50 RPM differential pattern; each V-tail channel applies a ±5° perturbation. "
@@ -2195,15 +2625,17 @@ with effectiveness_tab:
     )
 
 with trim_tab:
-    trim_columns = st.columns(4)
-    trim_columns[0].metric("Longitudinal trim", "Feasible" if trim["feasible"] else "Not feasible")
-    trim_columns[1].metric("Angle of attack", f"{float(trim['alpha_deg']):.2f}°")
-    trim_columns[2].metric("Collective motor speed", f"{float(trim['motor_rpm']):.0f} RPM")
-    trim_columns[3].metric("Symmetric V-tail", f"{float(trim['tail_deflection_deg']):.2f}°")
+    trim_columns = st.columns(5)
+    report.metric(trim_columns[0], "Longitudinal trim", "Feasible" if trim["feasible"] else "Not feasible")
+    report.metric(trim_columns[1], "Angle of attack", f"{float(trim['alpha_deg']):.2f}°")
+    report.metric(trim_columns[2], "Front pair motor speed", f"{float(trim['front_motor_rpm']):.0f} RPM")
+    report.metric(trim_columns[3], "Rear pair motor speed", f"{float(trim['rear_motor_rpm']):.0f} RPM")
+    report.metric(trim_columns[4], "Symmetric V-tail", f"{float(trim['tail_deflection_deg']):.2f}°")
     trim_acceleration = np.asarray(trim["acceleration_ned"], dtype=float)
     trim_moment = np.asarray(trim["moment_body"], dtype=float)
-    st.caption(
+    report.text("caption", st,
         f"Steady, level, zero-wind trim at {analysis_speed:.1f} m/s and {analysis_tilt_deg}° tilt; "
+        "each front/rear pair shares a speed; "
         f"bounds: α ±{np.rad2deg(analysis_aero.stall_angle):.1f}°, "
         f"motor 0–{max_rpm:.0f} RPM, V-tail ±{np.rad2deg(tail_limit_rad):.1f}°. "
         f"Residuals: aN={trim_acceleration[0]:.3f} m/s², "
@@ -2212,36 +2644,37 @@ with trim_tab:
         f"max normalized residual={float(trim['max_normalized_residual']):.4f}."
     )
     if trim["feasible"]:
-        st.success("Force and pitch-moment residuals are within the configured trim tolerance.")
+        report.text("success", st, "Force and pitch-moment residuals are within the configured trim tolerance.")
     else:
-        st.warning(
+        report.text("warning", st,
             "No feasible trim was found within the angle-of-attack, motor, and V-tail limits. "
             f"Optimizer: {trim['solver_message']}"
         )
 
 with stability_tab:
-    st.caption(
+    report.text("caption", st,
         "The map finite-differences body-moment coefficients around the longitudinal "
         "trim solution (or the optimizer's best-fit point) across airspeed and nacelle tilt."
     )
-    st.info(
+    report.text("info", st,
         "Static sign checks from the supplied reference: longitudinal C_mα < 0, "
         "lateral C_lβ < 0, and directional C_nβ > 0. These local derivatives do not "
         "establish dynamic stability."
     )
-    st.warning(
+    report.text("warning", st,
         "Simulation-only model check: the aerodynamic model uses built-in simplified "
         "coefficients rather than measured aircraft data, and the uploaded profile's "
         "aerodynamic coefficient fields are not yet wired into that model. A failed "
         "longitudinal trim means that cell's derivatives are exploratory, not stability "
         "evidence. This analysis does not issue or change actuator commands."
     )
-    st.caption(
+    report.text("caption", st,
         "The fixed grid uses 0–30 m/s in 5 m/s steps and 0–90° tilt in 15° steps. "
         "The calculation is on demand and is invalidated when the active aircraft settings change."
     )
 
     stability_signature = (
+        "independent_pair_trim_v1",
         dashboard_values_fingerprint,
         float(analysis_aero.CL_alpha),
         float(analysis_aero.CL_0),
@@ -2257,7 +2690,7 @@ with stability_tab:
         float(analysis_vtail.AR_tail),
         float(analysis_vtail.dihedral),
     )
-    if st.button("Compute stability map", key="compute_transition_stability_map"):
+    if generate_report or st.button("Compute stability map", key="compute_transition_stability_map"):
         with st.spinner("Solving trim and evaluating local derivatives across the transition grid..."):
             stability_result = transition_stability_map(
                 analysis_dynamics,
@@ -2272,9 +2705,9 @@ with stability_tab:
 
     map_record = st.session_state.get("transition_stability_map_result")
     if not isinstance(map_record, dict):
-        st.info("Compute the map to inspect trim quality, static derivatives, and actuator response.")
+        report.text("info", st, "Compute the map to inspect trim quality, static derivatives, and actuator response.")
     elif map_record.get("signature") != stability_signature:
-        st.info("Aircraft settings changed. Recompute the map before using these results.")
+        report.text("info", st, "Aircraft settings changed. Recompute the map before using these results.")
     else:
         stability_result = map_record["result"]
         assessed = np.asarray(stability_result["assessment_mask"], dtype=bool)
@@ -2282,16 +2715,16 @@ with stability_tab:
         assessed_count = int(np.count_nonzero(assessed))
         total_points = int(trim_feasible.size)
         stability_columns = st.columns(2)
-        stability_columns[0].metric(
+        report.metric(stability_columns[0],
             "Longitudinal trim-feasible points",
             f"{int(np.count_nonzero(trim_feasible))}/{total_points}",
         )
-        stability_columns[1].metric(
+        report.metric(stability_columns[1],
             "Static-derivative assessment points",
             f"{assessed_count}/{total_points}",
         )
         if assessed_count == 0:
-            st.warning(
+            report.text("warning", st,
                 "No grid point has both feasible longitudinal trim and nonzero modeled "
                 "aerodynamic pressure. Static stability is therefore not established "
                 "for this grid."
@@ -2320,13 +2753,13 @@ with stability_tab:
                 sign_consistent_count = int(
                     np.count_nonzero(assessed_values * stable_sign > 0.0)
                 )
-                column.metric(
+                report.metric(column,
                     f"{title} sign-consistent",
                     f"{sign_consistent_count}/{assessed_count}",
                 )
                 sign_failures |= sign_consistent_count < assessed_count
             else:
-                column.metric(f"{title} sign check", "Not assessed")
+                report.metric(column, f"{title} sign check", "Not assessed")
 
             figure = go.Figure(go.Heatmap(
                 z=derivative_values,
@@ -2352,7 +2785,7 @@ with stability_tab:
                 margin=dict(l=20, r=20, t=55, b=20),
                 height=340,
             )
-            column.plotly_chart(
+            report.plotly_chart(column,
                 figure,
                 width="stretch",
                 alt=f"{title} across airspeed and nacelle tilt; hover values include trim status",
@@ -2360,7 +2793,7 @@ with stability_tab:
             )
 
         if sign_failures:
-            st.warning(
+            report.text("warning", st,
                 "At least one trim-qualified grid point does not meet a reference static "
                 "derivative sign check. Review the model and aircraft data; this is not "
                 "a flight-control command or certification result."
@@ -2395,7 +2828,7 @@ with stability_tab:
             margin=dict(l=20, r=20, t=55, b=20),
             height=390,
         )
-        st.plotly_chart(
+        report.plotly_chart(st,
             trim_figure,
             width="stretch",
             alt="Longitudinal trim feasibility and residual across airspeed and nacelle tilt",
@@ -2410,8 +2843,8 @@ with stability_tab:
             stability_result["control_effectiveness_labels"]
         )
         peak_axis_response = np.max(np.abs(effectiveness), axis=-1)
-        st.markdown("#### Actuator response across the transition grid")
-        st.caption(
+        report.text("markdown", st, "#### Actuator response across the transition grid")
+        report.text("caption", st,
             "Heatmaps show the peak absolute moment change for each axis under the "
             "existing standard rotor/V-tail test perturbations. This is a local response "
             "comparison, not a full actuator-margin or dynamic-controllability assessment. "
@@ -2444,7 +2877,7 @@ with stability_tab:
                 margin=dict(l=20, r=20, t=55, b=20),
                 height=340,
             )
-            column.plotly_chart(
+            report.plotly_chart(column,
                 figure,
                 width="stretch",
                 alt=f"{title} across airspeed and nacelle tilt",
@@ -2454,11 +2887,11 @@ with stability_tab:
 # ==========================================================
 # PHASE 6: CONTROL LAW ARCHITECTURE
 # ==========================================================
-st.markdown("---")
-st.subheader("Phase 6: Control law architecture — the brain")
-st.caption(
+report.text("markdown", st, "---")
+report.text("subheader", st, "Phase 6: Control law architecture — the brain")
+report.text("caption", st,
     "The simulation now runs guidance → attitude → body-rate control → scheduled gains → "
-    "bounded actuator allocation. This is a simulation architecture, not flight-certified control software."
+    "bounded actuator allocation."
 )
 allocation_tab, rate_tab, attitude_tab, guidance_tab, schedule_tab = st.tabs([
     "6.1 Control allocation",
@@ -2470,15 +2903,15 @@ allocation_tab, rate_tab, attitude_tab, guidance_tab, schedule_tab = st.tabs([
 
 with allocation_tab:
     allocation_metrics = st.columns(3)
-    allocation_metrics[0].metric(
+    report.metric(allocation_metrics[0],
         "Time steps with allocation saturation",
         f"{100.0 * gust_info['allocation_saturation_fraction']:.1f}%",
     )
-    allocation_metrics[1].metric(
+    report.metric(allocation_metrics[1],
         "Final normalized allocation residual",
         f"{float(data['allocation_residual'][-1]):.3f}",
     )
-    allocation_metrics[2].metric(
+    report.metric(allocation_metrics[2],
         "Time steps with tilt protection",
         str(gust_info["tilt_limited_steps"]),
     )
@@ -2488,7 +2921,7 @@ with allocation_tab:
         "Controller tilt command (deg)": data["tilt_controller_cmd"],
         "Actual tilt (deg)": data["tilt"],
     })
-    st.line_chart(
+    report.line_chart(st,
         tilt_protection_frame,
         x="time_s",
         y=[
@@ -2505,22 +2938,22 @@ with allocation_tab:
         index=ControlAllocator.output_labels,
         columns=ControlAllocator.actuator_labels,
     )
-    st.dataframe(
+    report.dataframe(st,
         allocation_frame,
         alt="Local control allocation matrix from six actuators to collective thrust and body moments",
     )
-    st.caption(
-        "Rotor columns are derivatives per newton of rotor thrust; V-tail columns are "
+    report.text("caption", st,
+        "Derivatives per newton of rotor thrust; V-tail columns are "
         "moment derivatives per radian. Allocation is bounded by motor speed and ±11.5° "
         "tail travel; the reported residual exposes requests the actuators cannot meet."
     )
     if gust_info["allocation_saturation_fraction"] > 0.05:
-        st.warning(
+        report.text("warning", st,
             "Actuator limits or the available control axes prevented at least 5% of "
             "simulation-step requests from being allocated within tolerance."
         )
     if gust_info["tilt_limited_steps"] > 0:
-        st.warning(
+        report.text("warning", st,
             "Nacelle tilt was held or reduced when pitch allocation was short or "
             "pitch attitude/rate exceeded the controller's protection limits."
         )
@@ -2535,7 +2968,7 @@ with rate_tab:
         "r actual (deg/s)": np.rad2deg(data["body_r"]),
         "r target (deg/s)": np.rad2deg(data["desired_r"]),
     })
-    st.line_chart(
+    report.line_chart(st,
         rate_data,
         x="time_s",
         y=[
@@ -2547,7 +2980,7 @@ with rate_tab:
         y_label="Body angular rate (deg/s)",
         alt="Actual and commanded roll, pitch, and yaw rates",
     )
-    st.caption(
+    report.text("caption", st,
         "The inner loop compares body rates p, q, r with the outer-loop rate targets "
         "and requests body moments, subject to the allocator and actuator limits."
     )
@@ -2562,7 +2995,7 @@ with attitude_tab:
         "Heading actual (deg)": data["yaw"],
         "Heading target (deg)": np.rad2deg(data["desired_heading"]),
     })
-    st.line_chart(
+    report.line_chart(st,
         attitude_data,
         x="time_s",
         y=[
@@ -2574,7 +3007,7 @@ with attitude_tab:
         y_label="Attitude angle (deg)",
         alt="Actual roll, pitch, and heading compared with guidance targets",
     )
-    st.caption(
+    report.text("caption", st,
         "The outer loop converts roll, pitch, and wrapped heading errors into bounded "
         "body-rate targets before the inner loop acts."
     )
@@ -2601,14 +3034,14 @@ with guidance_tab:
         margin=dict(l=20, r=20, t=30, b=20),
         height=360,
     )
-    st.plotly_chart(
+    report.plotly_chart(st,
         path_figure,
         width="stretch",
         alt="Simulated north-east flight path and commanded waypoints",
     )
     altitude_tracking, speed_tracking = st.columns(2)
     with altitude_tracking:
-        st.line_chart(
+        report.line_chart(st,
             pd.DataFrame({
                 "time_s": data["t"],
                 "Altitude (m)": data["alt"],
@@ -2621,7 +3054,7 @@ with guidance_tab:
             alt="Guidance altitude tracking",
         )
     with speed_tracking:
-        st.line_chart(
+        report.line_chart(st,
             pd.DataFrame({
                 "time_s": data["t"],
                 "Horizontal airspeed (m/s)": data["airspeed_mps"],
@@ -2634,19 +3067,19 @@ with guidance_tab:
             alt="Guidance airspeed tracking",
         )
     guidance_metrics = st.columns(3)
-    guidance_metrics[0].metric(
+    report.metric(guidance_metrics[0],
         "Final path distance",
         f"{float(data['guidance_path_distance'][-1]):.1f} m",
     )
-    guidance_metrics[1].metric(
+    report.metric(guidance_metrics[1],
         "Final altitude error",
         f"{float(data['guidance_altitude_error'][-1]):.2f} m",
     )
-    guidance_metrics[2].metric(
+    report.metric(guidance_metrics[2],
         "Final heading error",
         f"{np.rad2deg(float(data['guidance_heading_error'][-1])):.1f}°",
     )
-    st.caption(
+    report.text("caption", st,
         "Position guidance steers toward the active north/east waypoint; altitude and "
         "airspeed references feed the vertical-thrust and pitch commands."
     )
@@ -2659,7 +3092,7 @@ with schedule_tab:
         "Nacelle tilt (deg)": data["tilt"],
     })
     blend_column, airspeed_column, tilt_column = st.columns(3)
-    blend_column.line_chart(
+    report.line_chart(blend_column,
         blend_data,
         x="time_s",
         y=["Transition blend (0 hover – 1 cruise)"],
@@ -2667,7 +3100,7 @@ with schedule_tab:
         y_label="Gain-schedule blend (0–1)",
         alt="Transition gain-scheduling blend through time",
     )
-    airspeed_column.line_chart(
+    report.line_chart(airspeed_column,
         blend_data,
         x="time_s",
         y=["Horizontal airspeed (m/s)"],
@@ -2675,7 +3108,7 @@ with schedule_tab:
         y_label="Horizontal airspeed (m/s)",
         alt="Airspeed through time",
     )
-    tilt_column.line_chart(
+    report.line_chart(tilt_column,
         blend_data,
         x="time_s",
         y=["Nacelle tilt (deg)"],
@@ -2698,7 +3131,7 @@ with schedule_tab:
             ("Rate Kd", "Derivative gain Kd"),
         ),
     ):
-        column.line_chart(
+        report.line_chart(column,
             scheduled_gain_data,
             x="time_s",
             y=[gain_key],
@@ -2706,7 +3139,7 @@ with schedule_tab:
             y_label=f"{gain_key} (configured units)",
             alt=f"{gain_name} scheduled through transition",
         )
-    st.caption(
+    report.text("caption", st,
         "The schedule linearly blends hover and cruise rate gains using the mean of "
         "normalized airspeed (0–20 m/s) and nacelle tilt (0–90°). Hover and cruise "
         "gain scales are adjustable in the PID sidebar."
@@ -2715,11 +3148,10 @@ with schedule_tab:
 # ==========================================================
 # PHASE 7: DISTURBANCE REJECTION AND SAFETY
 # ==========================================================
-st.markdown("---")
-st.subheader("Phase 7: Disturbance rejection and safety — the shield")
-st.caption(
-    "The backend now estimates air-relative transition state, protects commands against "
-    "the computed speed/tilt corridor, and supports seeded gust and actuator-failure trials."
+report.text("markdown", st, "---")
+report.text("subheader", st, "Phase 7: Disturbance rejection and safety — the shield")
+report.text("caption", st,
+    " "
 )
 gust_tab, observer_tab, envelope_tab, monte_carlo_tab = st.tabs([
     "7.1 Gust model",
@@ -2730,9 +3162,9 @@ gust_tab, observer_tab, envelope_tab, monte_carlo_tab = st.tabs([
 
 with gust_tab:
     wind_metrics = st.columns(3)
-    wind_metrics[0].metric("Wind model", gust_info["wind_model"])
-    wind_metrics[1].metric("Peak wind", f"{float(np.max(data['wind'])):.2f} m/s")
-    wind_metrics[2].metric("Seed", str(simulation_parameters["dryden_seed"]))
+    report.metric(wind_metrics[0], "Wind model", gust_info["wind_model"])
+    report.metric(wind_metrics[1], "Peak wind", f"{float(np.max(data['wind'])):.2f} m/s")
+    report.metric(wind_metrics[2], "Seed", str(simulation_parameters["dryden_seed"]))
     wind_frame = pd.DataFrame({
         "time_s": data["t"],
         "North gust (m/s)": data["wind_north"],
@@ -2740,7 +3172,7 @@ with gust_tab:
         "Down gust (m/s)": data["wind_down"],
         "Wind magnitude (m/s)": data["wind"],
     })
-    st.line_chart(
+    report.line_chart(st,
         wind_frame,
         x="time_s",
         y=[
@@ -2754,39 +3186,39 @@ with gust_tab:
         alt="North, east, down, and total gust wind applied during the simulation",
     )
     if gust_info["wind_model"] == "Dryden turbulence":
-        st.caption(
+        report.text("caption", st,
             "Dryden-like turbulence uses a seeded, correlated first-order process. "
             f"Configured σ: {gust_info['gust_sigma_mps']} m/s; "
             f"correlation time: {dryden_tau_s:.2f} s."
         )
     elif gust_info["wind_model"] == "Finite-duration gust":
-        st.caption(
+        report.text("caption", st,
             f"Half-cosine gust: {gust_info['dir']}, peak {gust_info['mag']:.1f} m/s, "
             f"from {gust_info['start']:.1f} s for {gust_info['dur']:.1f} s."
         )
     else:
-        st.info("Wind disturbance is disabled for this simulation.")
+        report.text("info", st, "Wind disturbance is disabled for this simulation.")
 
 with observer_tab:
     observer_metrics = st.columns(4)
-    observer_metrics[0].metric(
+    report.metric(observer_metrics[0],
         "Estimated airspeed",
         f"{float(data['transition_airspeed'][-1]):.2f} m/s",
     )
-    observer_metrics[1].metric(
+    report.metric(observer_metrics[1],
         "Estimated angle of attack",
         f"{np.rad2deg(float(data['transition_alpha_rad'][-1])):.2f}°",
     )
-    observer_metrics[2].metric(
+    report.metric(observer_metrics[2],
         "Estimated sideslip",
         f"{np.rad2deg(float(data['transition_beta_rad'][-1])):.2f}°",
     )
-    observer_metrics[3].metric(
+    report.metric(observer_metrics[3],
         "Transition phase",
         str(data["transition_phase"][-1]).title(),
     )
     observer_speed_col, observer_angle_col = st.columns(2)
-    observer_speed_col.line_chart(
+    report.line_chart(observer_speed_col,
         pd.DataFrame({
             "time_s": data["t"],
             "Observer airspeed (m/s)": data["transition_airspeed"],
@@ -2803,7 +3235,7 @@ with observer_tab:
         y_label="Airspeed (m/s)",
         alt="Observer airspeed compared with dynamics true airspeed and commanded speed",
     )
-    observer_angle_col.line_chart(
+    report.line_chart(observer_angle_col,
         pd.DataFrame({
             "time_s": data["t"],
             "Angle of attack (deg)": np.rad2deg(data["transition_alpha_rad"]),
@@ -2815,7 +3247,7 @@ with observer_tab:
         y_label="Aerodynamic angle (deg)",
         alt="Filtered angle-of-attack and sideslip estimates during transition",
     )
-    st.line_chart(
+    report.line_chart(st,
         pd.DataFrame({
             "time_s": data["t"],
             "Transition blend (0 hover – 1 cruise)": data["transition_blend"],
@@ -2827,7 +3259,7 @@ with observer_tab:
         y_label="Transition progress (0–1)",
         alt="Observer transition progress compared with the controller gain-schedule blend",
     )
-    st.caption(
+    report.text("caption", st,
         f"Observer filter time constant: {observer_time_constant_s:.2f} s. "
         "Airspeed is computed from body-frame velocity relative to the simulated wind."
     )
@@ -2837,7 +3269,7 @@ with envelope_tab:
         protection_status = "Active"
     elif enable_envelope_protection:
         protection_status = "Unavailable"
-        st.warning(
+        report.text("warning", st,
             "Envelope protection was requested, but the current aircraft configuration "
             "has no feasible transition-corridor samples, so no envelope filter was applied."
         )
@@ -2845,16 +3277,16 @@ with envelope_tab:
         protection_status = "Disabled"
 
     envelope_metrics = st.columns(4)
-    envelope_metrics[0].metric("Protection", protection_status)
-    envelope_metrics[1].metric(
+    report.metric(envelope_metrics[0], "Protection", protection_status)
+    report.metric(envelope_metrics[1],
         "Steps with protected commands",
         f"{100.0 * gust_info['envelope_protected_fraction']:.1f}%",
     )
-    envelope_metrics[2].metric(
+    report.metric(envelope_metrics[2],
         "Steps outside corridor",
         f"{100.0 * gust_info['envelope_outside_fraction']:.1f}%",
     )
-    envelope_metrics[3].metric(
+    report.metric(envelope_metrics[3],
         "Mean available control authority",
         f"{100.0 * float(np.mean(data['available_control_authority'])):.1f}%",
     )
@@ -2899,7 +3331,7 @@ with envelope_tab:
         margin=dict(l=20, r=20, t=30, b=20),
         height=420,
     )
-    st.plotly_chart(
+    report.plotly_chart(st,
         envelope_figure,
         width="stretch",
         alt="Observed transition against the feasible airspeed and nacelle-tilt corridor",
@@ -2913,7 +3345,7 @@ with envelope_tab:
         "Available control authority (%)": 100.0 * data["available_control_authority"],
     })
     protection_tilt_col, protection_authority_col = st.columns(2)
-    protection_tilt_col.line_chart(
+    report.line_chart(protection_tilt_col,
         protection_frame,
         x="time_s",
         y=[
@@ -2925,7 +3357,7 @@ with envelope_tab:
         y_label="Nacelle tilt (deg)",
         alt="Requested, protected, and actual nacelle tilt",
     )
-    protection_authority_col.line_chart(
+    report.line_chart(protection_authority_col,
         protection_frame,
         x="time_s",
         y=["Available control authority (%)"],
@@ -2943,25 +3375,25 @@ with envelope_tab:
         .reset_index(name="Time steps")
     )
     if reason_counts.empty:
-        st.info("No Phase 7 envelope-protection limit was triggered in this simulation.")
+        report.text("info", st, "No Phase 7 envelope-protection limit was triggered in this simulation.")
     else:
-        st.dataframe(
+        report.dataframe(st,
             reason_counts,
             hide_index=True,
             alt="Counts of each envelope-protection reason during the simulation",
         )
-    st.caption(
+    report.text("caption", st,
         f"Protection limits: α ≤ {max_alpha_deg:.1f}°, pitch ≤ {max_pitch_deg:.1f}°, "
         f"body rates ≤ {max_body_rate_deg_s:.0f}°/s, and a {speed_margin_mps:.1f} m/s "
         "margin around the quasi-steady corridor. These are simulation safeguards, not certification."
     )
 
 with monte_carlo_tab:
-    st.caption(
+    report.text("caption", st,
         "Each trial runs the configured mission with a reproducible Dryden-like gust and, "
         "according to the selected probability, one degraded actuator."
     )
-    if st.button(
+    if generate_report or st.button(
         "Run Monte Carlo validation",
         key="run_phase7_monte_carlo",
         type="primary",
@@ -3016,13 +3448,13 @@ with monte_carlo_tab:
 
     monte_carlo_report = st.session_state.get("phase7_monte_carlo_report")
     if monte_carlo_report is None:
-        st.info("Run validation to evaluate gust and actuator-failure scenarios.")
+        report.text("info", st, "Run validation to evaluate gust and actuator-failure scenarios.")
     else:
         failed_trials = [trial for trial in monte_carlo_report.trials if not trial.passed]
         mc_metrics = st.columns(3)
-        mc_metrics[0].metric("Pass rate", f"{100.0 * monte_carlo_report.success_rate:.1f}%")
-        mc_metrics[1].metric("Passed trials", f"{len(monte_carlo_report.trials) - len(failed_trials)}")
-        mc_metrics[2].metric("Failed trials", str(len(failed_trials)))
+        report.metric(mc_metrics[0], "Pass rate", f"{100.0 * monte_carlo_report.success_rate:.1f}%")
+        report.metric(mc_metrics[1], "Passed trials", f"{len(monte_carlo_report.trials) - len(failed_trials)}")
+        report.metric(mc_metrics[2], "Failed trials", str(len(failed_trials)))
 
         trial_rows = []
         for trial in monte_carlo_report.trials:
@@ -3047,7 +3479,7 @@ with monte_carlo_tab:
                 "Failure reasons": ", ".join(trial.failure_reasons),
             })
         trial_frame = pd.DataFrame(trial_rows)
-        st.dataframe(
+        report.dataframe(st,
             trial_frame,
             hide_index=True,
             alt="Per-trial Monte Carlo gust, actuator-failure, and safety results",
@@ -3063,7 +3495,7 @@ with monte_carlo_tab:
             xaxis_title="Peak absolute pitch angle (deg)",
             yaxis_title="Number of trials",
         )
-        pitch_chart_col.plotly_chart(
+        report.plotly_chart(pitch_chart_col,
             pitch_figure,
             width="stretch",
             alt="Distribution of peak absolute pitch across Monte Carlo trials",
@@ -3077,12 +3509,12 @@ with monte_carlo_tab:
             xaxis_title="Peak absolute angle of attack (deg)",
             yaxis_title="Number of trials",
         )
-        alpha_chart_col.plotly_chart(
+        report.plotly_chart(alpha_chart_col,
             alpha_figure,
             width="stretch",
             alt="Distribution of peak absolute angle of attack across Monte Carlo trials",
         )
-        st.caption(
+        report.text("caption", st,
             f"Seed {monte_carlo_report.seed}; safety limits are |pitch| ≤ 60°, "
             "|α| ≤ 25°, minimum altitude ≥ 0 m, and mission completion. "
             "This Monte Carlo batch is a model validation aid, not flight certification."
@@ -3091,9 +3523,9 @@ with monte_carlo_tab:
 # ==========================================================
 # PHASE 8: AIRCRAFT PROFILE AND BENCH HIL READINESS
 # ==========================================================
-st.markdown("---")
-st.subheader("Aircraft profile and PX4 bench-HIL readiness")
-st.caption(
+report.text("markdown", st, "---")
+report.text("subheader", st, "Aircraft profile and PX4 bench-HIL readiness")
+report.text("caption", st,
     "Load and version aircraft data independently of this example model. Custom fields are "
     "preserved in profile files; only the currently supported four-rotor tiltrotor subset "
     "is used by the flight simulation."
@@ -3119,45 +3551,38 @@ with profile_tab:
         st.session_state["_aircraft_summary_fingerprint"] = profile_fingerprint
     profile_summary = st.session_state["_aircraft_summary"]
     profile_metrics = st.columns(4)
-    profile_metrics[0].metric("Profile", active_profile["metadata"]["name"])
-    profile_metrics[1].metric("Schema version", str(active_profile["schema_version"]))
-    profile_metrics[2].metric(
+    report.metric(profile_metrics[0], "Profile", active_profile["metadata"]["name"])
+    report.metric(profile_metrics[1], "Schema version", str(active_profile["schema_version"]))
+    report.metric(profile_metrics[2],
         "Aircraft data values", f"{profile_summary['parameter_count']:,}"
     )
-    profile_metrics[3].metric(
+    report.metric(profile_metrics[3],
         "Custom extension values",
         f"{profile_summary['extension_count']:,}",
     )
-    st.dataframe(
+    report.dataframe(st,
         pd.DataFrame(profile_summary["subsystems"]),
         hide_index=True,
         alt="Aircraft profile subsystem coverage and configured value counts",
     )
-    st.info(
-        "Use the YAML template for detailed mass properties, geometry, propulsion, "
-        "aerodynamics, actuators, sensors, control allocation, transition limits, wind, "
-        "faults, and PX4 bench metadata. Add aircraft-specific fields under extensions; "
-        "the loader retains fields it does not yet model."
+    report.text("info", st,
+        " "
     )
 
 with hil_tab:
     hardware_profile = export_profile.get("hardware", {})
     hil_metrics = st.columns(3)
-    hil_metrics[0].metric("Autopilot", str(hardware_profile.get("autopilot", "Not specified")))
-    hil_metrics[1].metric("Protocol", str(hardware_profile.get("protocol", "Not specified")))
-    hil_metrics[2].metric(
+    report.metric(hil_metrics[0], "Autopilot", str(hardware_profile.get("autopilot", "Not specified")))
+    report.metric(hil_metrics[1], "Protocol", str(hardware_profile.get("protocol", "Not specified")))
+    report.metric(hil_metrics[2],
         "Execution mode",
         str(hardware_profile.get("execution_mode", "simulation")),
     )
-    st.warning(
-        "This project does not connect to PX4 or transmit actuator commands. The hardware "
-        "section is configuration metadata only; bench testing must keep propulsion outputs "
-        "physically disconnected or independently inhibited."
+    report.text("warning", st,
+        " "
     )
-    st.markdown(
-        "Before any future HIL adapter is enabled, verify sensor/actuator scaling, transport "
-        "timeouts, command freshness, watchdog behavior, failsafe transitions, and independent "
-        "output inhibition on a bench rig. This dashboard is not a flight-control system."
+    report.text("markdown", st,
+        " "
     )
 
 # ==========================================================
@@ -3165,9 +3590,9 @@ with hil_tab:
 # ==========================================================
 import trimesh
 
-st.markdown("---")
-st.subheader("3D Aircraft & Coordinate Systems")
-st.markdown("The Earth frame is fixed (Red/Green/Blue). The UAM rotates based on the flight telemetry.")
+report.text("markdown", st, "---")
+report.text("subheader", st, "3D Aircraft & Coordinate Systems")
+report.text("markdown", st, "The Earth frame is fixed (Red/Green/Blue). The UAM rotates based on the flight telemetry.")
 
 time_idx = st.slider("Scrub through flight time (s)", 0.0, float(data["t"][-1]), 5.0, 0.1)
 idx = np.argmin(np.abs(data["t"] - time_idx))
@@ -3223,11 +3648,11 @@ if os.path.exists(stl_path):
             opacity=1.0,
             name='UAM CAD Model'
         ))
-        st.success("✅ CAD Model loaded and centered successfully!")
+        report.text("success", st, "✅ CAD Model loaded and centered successfully!")
     except Exception as e:
-        st.error(f"Error loading STL: {e}")
+        report.text("error", st, f"Error loading STL: {e}")
 else:
-    st.warning(f"⚠️ CAD model not found at {stl_path}")
+    report.text("warning", st, f"⚠️ CAD model not found at {stl_path}")
 
 # --- Layout ---
 fig_3d.update_layout(
@@ -3244,46 +3669,47 @@ fig_3d.update_layout(
     height=600
 )
 
-st.plotly_chart(fig_3d, width="stretch", alt="Three-dimensional aircraft model with the earth and body coordinate frames")
+report.plotly_chart(st, fig_3d, width="stretch", alt="Three-dimensional aircraft model with the earth and body coordinate frames")
 # ==========================================================
 # ==========================================================
 # 3D CAD SKELETON WITH CUSTOM AIRFOILS & CONTROL SURFACES
 # ==========================================================
 from src.aero.airfoil import generate_naca4, parse_airfoil_file
 
-st.markdown("---")
-st.subheader(" 3D CAD Geometry & Control Surfaces")
+report.text("markdown", st, "---")
+report.text("subheader", st, " 3D CAD Geometry & Control Surfaces")
 
 # --- AIRFOIL SELECTION ---
-st.markdown("### 1. Airfoil Selection")
+report.text("markdown", st, "### 1. Airfoil Selection")
 c1, c2 = st.columns(2)
 
 with c1:
-    st.markdown("**Main Wing**")
-    wing_af_type = st.selectbox("Type", ["NACA 0012", "Custom Upload"], key="w_type")
-    if wing_af_type == "NACA 0012":
-        w_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+    report.text("markdown", st, "**Main Wing**")
+    wing_af_type = st.selectbox("Type", ["NACA 6412", "Custom Upload"], key="w_type")
+    if wing_af_type == "NACA 6412":
+        
+        w_coords = generate_naca4(m=0.06, p=0.4, t=0.12)
     else:
         w_file = st.file_uploader("Upload Wing .dat", type=["dat", "txt"], key="w_up")
         if w_file is not None:
             w_coords = parse_airfoil_file(w_file.getvalue())
         else:
-            w_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+            w_coords = generate_naca4(m=0.06, p=0.4, t=0.12)
 
 with c2:
-    st.markdown("**V-Tail**")
-    vt_af_type = st.selectbox("Type", ["NACA 0012", "Custom Upload"], key="vt_type")
-    if vt_af_type == "NACA 0012":
-        vt_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+    report.text("markdown", st, "**V-Tail**")
+    vt_af_type = st.selectbox("Type", ["NACA 6412", "Custom Upload"], key="vt_type")
+    if vt_af_type == "NACA 6412":
+        vt_coords = generate_naca4(m=0.06, p=0.4, t=0.12)
     else:
         vt_file = st.file_uploader("Upload V-Tail .dat", type=["dat", "txt"], key="vt_up")
         if vt_file is not None:
             vt_coords = parse_airfoil_file(vt_file.getvalue())
         else:
-            vt_coords = generate_naca4(m=0.0, p=0.4, t=0.12)
+            vt_coords = generate_naca4(m=0.06, p=0.4, t=0.12)
 
 # --- CONTROL SURFACES ---
-st.markdown("### 2. Control Surface Parameters")
+report.text("markdown", st, "### 2. Control Surface Parameters")
 c3, c4 = st.columns(2)
 with c3:
     cs_chord = st.slider("Control Surface Chord (% of Wing Chord)", 0.1, 0.5, 0.20, 0.05)
@@ -3337,5 +3763,74 @@ fig_cad.update_layout(
     margin=dict(l=0, r=0, b=0, t=0), height=600
 )
 
-st.plotly_chart(fig_cad, width="stretch", alt="Three-dimensional wing, V-tail, control surfaces, motors, and thrust directions")
+report.plotly_chart(st, fig_cad, width="stretch", alt="Three-dimensional wing, V-tail, control surfaces, motors, and thrust directions")
+
+report_signature = hashlib.sha256(
+    repr((
+        dashboard_values_fingerprint,
+        simulation_parameters,
+        corridor_signature,
+        stability_signature,
+        analysis_speed,
+        analysis_tilt_deg,
+        monte_carlo_trials,
+        monte_carlo_seed,
+        monte_carlo_gust_sigma,
+        monte_carlo_failure_probability,
+        profile_preview_tilt_deg,
+        time_idx,
+        cs_chord,
+        cs_span,
+        tilt_deg,
+        np.asarray(w_coords).tolist(),
+        np.asarray(vt_coords).tolist(),
+    )).encode("utf-8")
+).hexdigest()
+
+if generate_report:
+    report.items.insert(
+        0,
+        ReportItem(
+            "text",
+            "",
+            f"Simulation termination: {gust_info['termination_reason']}; "
+            f"recorded duration: {gust_info['elapsed_time']:.2f} s. "
+            f"Simulation inputs: {simulation_parameters}",
+        ),
+    )
+    with st.spinner("Rendering all report graphs and creating Word and PDF files..."):
+        try:
+            report_word, report_pdf = report.render(
+                active_profile["metadata"]["name"],
+                serialize_aircraft_profile(export_profile).decode("utf-8"),
+            )
+        except (RuntimeError, ValueError, OSError) as exc:
+            report_downloads.error(f"Could not generate the full report: {exc}")
+        else:
+            st.session_state["full_simulation_report"] = {
+                "signature": report_signature,
+                "word": report_word,
+                "pdf": report_pdf,
+            }
+
+saved_report = st.session_state.get("full_simulation_report")
+if isinstance(saved_report, dict) and saved_report.get("signature") == report_signature:
+    report_downloads.download_button(
+        "Download report (Word)",
+        data=saved_report["word"],
+        file_name="aircraft_transition_simulation_report.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        on_click="ignore",
+        key="download_simulation_report_word",
+    )
+    report_downloads.download_button(
+        "Download report (PDF)",
+        data=saved_report["pdf"],
+        file_name="aircraft_transition_simulation_report.pdf",
+        mime="application/pdf",
+        on_click="ignore",
+        key="download_simulation_report_pdf",
+    )
+elif isinstance(saved_report, dict):
+    report_downloads.info("Inputs changed. Generate a fresh report for the current configuration.")
 

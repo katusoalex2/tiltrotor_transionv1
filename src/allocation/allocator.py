@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import lsq_linear
 
+from src.dynamics.rotor import tilted_rotor_position
+
 
 DEFAULT_MOTOR_POSITIONS = (
     (0.3, -0.4, 0.0, True),
@@ -38,12 +40,17 @@ class ControlAllocator:
         max_omega: float = 3000.0,
         arm_length: float = 0.4,
         motor_positions=None,
+        tilt_pivot_xz=(0.1, 0.0),
     ):
         self.k_thrust = float(k_thrust)
         self.max_omega = float(max_omega)
         self.arm_length = float(arm_length)
         if self.k_thrust <= 0.0 or self.max_omega <= 0.0 or self.arm_length <= 0.0:
             raise ValueError("thrust coefficient, maximum speed, and arm length must be positive")
+        pivot = np.asarray(tilt_pivot_xz, dtype=float)
+        if pivot.shape != (2,) or not np.all(np.isfinite(pivot)):
+            raise ValueError("tilt pivot must be a finite x/z pair")
+        self.tilt_pivot_xz = tuple(pivot)
 
         positions = DEFAULT_MOTOR_POSITIONS if motor_positions is None else motor_positions
         position_vectors = [np.asarray(position, dtype=float) for position in positions]
@@ -68,15 +75,12 @@ class ControlAllocator:
             raise ValueError("tilt command must be between 0 and 90 degrees")
 
         matrix = np.zeros((4, 6), dtype=float)
-        pivot_x = 0.1
         for index, position_values in enumerate(self.motor_positions):
             x, y, z = position_values[:3]
             tilts = bool(position_values[3]) if len(position_values) == 4 else False
             rotor_tilt = tilt_cmd if tilts else 0.0
             if tilts:
-                relative_x = x - pivot_x
-                x = pivot_x + relative_x * np.cos(rotor_tilt) + z * np.sin(rotor_tilt)
-                z = -relative_x * np.sin(rotor_tilt) + z * np.cos(rotor_tilt)
+                x, y, z = tilted_rotor_position(position_values, rotor_tilt, self.tilt_pivot_xz)
 
             force_per_newton = np.array([np.sin(rotor_tilt), 0.0, -np.cos(rotor_tilt)])
             matrix[0, index] = 1.0

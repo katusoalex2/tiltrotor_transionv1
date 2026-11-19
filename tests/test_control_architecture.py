@@ -8,6 +8,7 @@ from src.aero.aerodynamics import AeroModel
 from src.dynamics.state import AircraftState
 from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
+from src.dynamics.mass_properties import MassProperties
 from src.aero.vtail import VtailModel
 
 
@@ -45,6 +46,49 @@ def test_allocation_matrix_matches_rotor_geometry_and_tail_derivatives():
         [0.3, 0.3, -0.3, -0.3],
     ])
     np.testing.assert_allclose(matrix[1:, 4:], tail_effectiveness)
+
+
+def test_allocator_and_plant_use_the_same_configured_tilt_pivot():
+    positions = (
+        (0.5, -0.4, 0.4, True),
+        (0.5, 0.4, 0.4, True),
+        (-0.3, -0.4, 0.0, False),
+        (-0.3, 0.4, 0.0, False),
+    )
+    pivot = (0.3, 0.2)
+    allocator = ControlAllocator(motor_positions=positions, tilt_pivot_xz=pivot)
+
+    class Props:
+        motor_positions = positions
+        tilt_pivot_xz = pivot
+
+    dynamics = TiltrotorDynamics(
+        mass=1.0,
+        rotor=RotorModel(k_thrust=1.0, max_omega=10.0),
+        mass_props=Props(),
+    )
+    _, moment, _ = dynamics._rotor_forces_and_moments(
+        np.array([1.0, 0.0, 0.0, 0.0]), np.pi / 2, 100.0
+    )
+    matrix = allocator.allocation_matrix(np.pi / 2)
+
+    np.testing.assert_allclose(matrix[1:, 0], [0.0, 0.0, 0.4], atol=1e-12)
+    np.testing.assert_allclose(moment, matrix[1:, 0], atol=1e-12)
+
+
+def test_motor_inertia_uses_configured_tilt_pivot():
+    props = MassProperties("configs/aircraft.yaml")
+    props.mass_fuselage = props.mass_wing = props.mass_vtail = 0.0
+    props.mass_motor = 1.0
+    props.motor_positions = [(0.5, 0.0, 0.4, True)]
+    props.tilt_pivot_xz = (0.3, 0.2)
+    props.sweep_deg = 0.0
+
+    np.testing.assert_allclose(
+        props.calculate_inertia(90.0),
+        np.diag([0.0, 0.25, 0.25]),
+        atol=1e-12,
+    )
 
 
 def test_allocator_tracks_hover_collective_and_bounds_actuators():

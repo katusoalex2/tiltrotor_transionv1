@@ -166,3 +166,26 @@ def test_vtail_surface_inputs_contribute_body_force_and_moment():
     assert np.allclose(dynamics.last_diagnostics["force_body"], [0.0, 2.0, 0.0])
     assert np.allclose(dynamics.last_diagnostics["moment_body"], [3.0, 4.0, 5.0])
     assert np.allclose(dynamics.last_diagnostics["angular_acceleration_body"], [1.5, 4.0 / 3.0, 1.25])
+
+
+def test_vtail_symmetric_deflections_produce_no_side_force_or_yaw():
+    tail = VtailModel(area=0.04, arm_length=0.285)
+    force, moment = tail.compute_forces_and_moments(
+        np.array([10.0, 0.0, 0.0]), np.zeros(3), 0.1, 0.1
+    )
+
+    assert force[2] < 0.0
+    assert abs(force[1]) < 1e-12
+    np.testing.assert_allclose(moment, np.cross([-0.285, 0.0, 0.0], force))
+
+
+def test_vtail_opposite_deflections_produce_side_force_and_yaw():
+    tail = VtailModel(area=0.04, arm_length=0.285)
+    force, moment = tail.compute_forces_and_moments(
+        np.array([10.0, 0.0, 0.0]), np.zeros(3), 0.1, -0.1
+    )
+
+    assert abs(force[1]) > 0.0
+    assert abs(force[2]) < 1e-12
+    assert abs(moment[2]) > 0.0
+    np.testing.assert_allclose(moment, np.cross([-0.285, 0.0, 0.0], force))

@@ -13,8 +13,14 @@ class CascadeController:
         current_alt = -state.pos[2]
         current_pitch = state.att[1]
         pitch_from_alt = self.alt_pid.compute(ref_altitude, current_alt, 0.02)
-        # Allow pitch up to 25 degrees (0.45 rad)
+        # Allow pitch up to 25 degrees (0.45 rad), but limit based on tilt to avoid excessive AoA
         desired_pitch = np.clip(pitch_from_alt, -0.25, 0.45)
+        
+        # Angle-of-attack limiter: aggressive reduction at high tilt
+        tilt_sin = np.sin(float(state.tilt))
+        max_pitch_for_aoa = np.deg2rad(25.0 - 20.0 * tilt_sin)
+        desired_pitch = float(np.clip(desired_pitch, -max_pitch_for_aoa, max_pitch_for_aoa))
+        
         vtail_cmd = -self.pitch_pid.compute(desired_pitch, current_pitch, 0.01)
         altitude_error = ref_altitude - current_alt
         total_thrust = (self.mass * 9.81) + (altitude_error * 0.5)

@@ -1,5 +1,5 @@
 # AIRCRAFT CONFIGURATION FORM
-# Fill in the numbers below. The code will read these automatically.
+# This configuration file defines the physical properties, rotor and motor characteristics, cruise altitude settings, and PID gains for a specific aircraft. It is structured in YAML format for easy readability and modification.
 
 # --- Aircraft Physical Properties ---
 mass: 5.0                 # kg

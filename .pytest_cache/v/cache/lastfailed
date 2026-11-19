@@ -1,1 +1,6 @@
-{}
+{
+  "tests/test_aircraft_profile_excel.py": true,
+  "tests/test_aircraft_profile_preview.py": true,
+  "tests/test_dashboard_axis_labels.py": true,
+  "tests/test_simulation_report.py": true
+}

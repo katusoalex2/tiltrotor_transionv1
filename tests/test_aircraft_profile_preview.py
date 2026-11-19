@@ -3,7 +3,11 @@ from pathlib import Path
 import numpy as np
 
 from src.configuration.aircraft_profile import dashboard_defaults, load_aircraft_profile
-from src.configuration.aircraft_profile_preview import build_aircraft_profile_figure
+from src.configuration.aircraft_profile_preview import (
+    build_aircraft_profile_figure,
+    build_transition_reference_animation,
+)
+from src.control.mission import MissionProfile
 
 
 PROFILE_TEMPLATE = (
@@ -56,3 +60,33 @@ def test_preview_tilt_moves_enabled_rotors_and_changes_thrust_axis():
         level_traces["Rotor 3 center"].z,
         tilted_traces["Rotor 3 center"].z,
     )
+
+
+def test_reference_animation_reaches_ninety_degrees_without_tilting_fixed_rotors():
+    figure = build_transition_reference_animation("Test UAM", load_preview_values())
+    first, last = figure.frames[0], figure.frames[-1]
+    first_traces = {trace.name: trace for trace in first.data}
+    last_traces = {trace.name: trace for trace in last.data}
+
+    assert first.name == "0.00"
+    assert last.name == "21.00"
+    assert "REFERENCE ONLY" in last.layout.title.text
+    front_angles = []
+    for frame in figure.frames:
+        traces = {trace.name: trace for trace in frame.data}
+        axis = traces["Rotor 1 thrust axis"]
+        front_angles.append(np.arctan2(axis.x[1] - axis.x[0], axis.z[1] - axis.z[0]))
+        for coordinate in ("x", "y", "z"):
+            np.testing.assert_allclose(
+                getattr(traces["Rotor 3 thrust axis"], coordinate),
+                getattr(first_traces["Rotor 3 thrust axis"], coordinate),
+            )
+    mission = MissionProfile()
+    expected = [mission.at(float(frame.name))["tilt"] for frame in figure.frames]
+    np.testing.assert_allclose(front_angles, expected, atol=1e-12)
+    assert np.all(np.diff(front_angles) >= 0.0)
+    assert np.isclose(front_angles[0], 0.0)
+    assert np.isclose(front_angles[-1], np.pi / 2)
+    front_axis = last_traces["Rotor 1 thrust axis"]
+    assert front_axis.x[1] > front_axis.x[0]
+    assert np.isclose(front_axis.z[1], front_axis.z[0], atol=1e-12)

@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import plotly.graph_objects as go
 
+from src.control.mission import MissionProfile
+
 
 def build_aircraft_profile_figure(
     aircraft_name: str,
@@ -230,6 +232,78 @@ def build_aircraft_profile_figure(
         },
         margin={"l": 0, "r": 0, "b": 0, "t": 44},
         height=620,
+    )
+    return figure
+
+
+def build_transition_reference_animation(
+    aircraft_name: str,
+    values: Mapping[str, Any],
+) -> go.Figure:
+    """Animate the timed mission reference, not a simulated aircraft trajectory."""
+    mission = MissionProfile()
+    times = np.linspace(0.0, mission.total_time, 43)
+    figure = build_aircraft_profile_figure(aircraft_name, values, 0.0)
+    rotor_indices = [
+        index for index, trace in enumerate(figure.data)
+        if trace.name and trace.name.startswith("Rotor ")
+    ]
+    axis_names = ("xaxis", "yaxis", "zaxis")
+    bounds = {
+        axis: list(getattr(figure.layout.scene, axis).range)
+        for axis in axis_names
+    }
+    frames = []
+    steps = []
+    for time in times:
+        angle = math.degrees(float(mission.at(float(time))["tilt"]))
+        preview = build_aircraft_profile_figure(aircraft_name, values, angle)
+        for axis in axis_names:
+            axis_range = getattr(preview.layout.scene, axis).range
+            bounds[axis][0] = min(bounds[axis][0], axis_range[0])
+            bounds[axis][1] = max(bounds[axis][1], axis_range[1])
+        name = f"{time:.2f}"
+        frames.append(go.Frame(
+            name=name,
+            traces=rotor_indices,
+            data=[preview.data[index] for index in rotor_indices],
+            layout=go.Layout(
+                title_text=f"REFERENCE ONLY — {time:.1f} s, tilt {angle:.1f}°"
+            ),
+        ))
+        steps.append({
+            "label": f"{time:.1f}",
+            "method": "animate",
+            "args": [[name], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
+        })
+
+    figure.frames = frames
+    figure.update_layout(
+        title={"text": "REFERENCE ONLY — 0.0 s, tilt 0.0°", "x": 0.02},
+        scene={axis: {"range": bounds[axis]} for axis in axis_names},
+        annotations=[{
+            "text": "REFERENCE ONLY — NOT SIMULATED FLIGHT",
+            "x": 0.5, "y": 1.0, "xref": "paper", "yref": "paper",
+            "showarrow": False,
+        }],
+        updatemenus=[{
+            "type": "buttons",
+            "showactive": False,
+            "x": 0.0, "y": 0.0,
+            "buttons": [
+                {"label": "Play", "method": "animate", "args": [
+                    None, {"fromcurrent": True, "frame": {"duration": 500, "redraw": True},
+                           "transition": {"duration": 0}}
+                ]},
+                {"label": "Pause", "method": "animate", "args": [
+                    [None], {"mode": "immediate", "frame": {"duration": 0, "redraw": True},
+                             "transition": {"duration": 0}}
+                ]},
+            ],
+        }],
+        sliders=[{"active": 0, "currentvalue": {"prefix": "Reference time (s): "},
+                  "steps": steps, "x": 0.2, "len": 0.8, "y": 0.0}],
+        margin={"l": 0, "r": 0, "b": 80, "t": 70},
     )
     return figure
 

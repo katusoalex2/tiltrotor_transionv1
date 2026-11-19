@@ -6,7 +6,8 @@ GRAVITY = 9.81
 
 
 def compute_lift_breakdown(state, tilt, V_T, alpha, rotor_thrust, wing_area, 
-                           mass, CL_alpha=4.0, CL_0=0.1, prop_radius=0.15):
+                           mass, CL_alpha=4.0, CL_0=0.1, prop_radius=0.15,
+                           *, rotor_thrusts=None, rotor_tilts=None):
     """Returns the full lift breakdown at this instant.
     
     Args:
@@ -20,13 +21,32 @@ def compute_lift_breakdown(state, tilt, V_T, alpha, rotor_thrust, wing_area,
         CL_alpha: Lift curve slope (per rad)
         CL_0: Zero-alpha lift coefficient
         prop_radius: Rotor radius (m)
+        rotor_thrusts: Individual rotor thrusts (N), in actuator order
+        rotor_tilts: Whether each corresponding rotor tilts
     
     Returns:
         dict with rotor_thrust, wing_lift, wash_lift, total_vertical, mg, 
         surplus, handoff_ratio
     """
     # 1. Rotor Vertical Thrust
-    rotor_vertical = rotor_thrust * np.cos(tilt)
+    if rotor_thrusts is None and rotor_tilts is None:
+        rotor_vertical = rotor_thrust * np.cos(tilt)
+    elif rotor_thrusts is None or rotor_tilts is None:
+        raise ValueError("individual rotor thrusts and tilt flags must be provided together")
+    else:
+        thrusts = np.asarray(rotor_thrusts, dtype=float)
+        flags = np.asarray(rotor_tilts)
+        if (
+            thrusts.ndim != 1
+            or thrusts.size == 0
+            or flags.shape != thrusts.shape
+            or flags.dtype.kind != "b"
+            or not np.all(np.isfinite(thrusts))
+            or np.any(thrusts < 0)
+            or not np.isclose(np.sum(thrusts), rotor_thrust)
+        ):
+            raise ValueError("rotor thrusts and boolean tilt flags must match the total thrust")
+        rotor_vertical = float(np.sum(thrusts * np.where(flags, np.cos(tilt), 1.0)))
     
     # 2. Wing Lift (Free Stream)
     if V_T > 0.5:

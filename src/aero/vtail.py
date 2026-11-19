@@ -61,32 +61,13 @@ class VtailModel:
         D_left = q_bar * (self.area / 2.0) * CD_left
         D_right = q_bar * (self.area / 2.0) * CD_right
         
-        # 6. Decompose into Body Forces (X, Y, Z)
-        # The surfaces are tilted at the dihedral angle
-        # Force normal to the left surface
-        F_normal_left = -L_left * np.cos(self.dihedral) - D_left * np.sin(self.dihedral)
-        # Force along the left surface (side)
-        F_side_left = -L_left * np.sin(self.dihedral) + D_left * np.cos(self.dihedral)
-        
-        F_normal_right = -L_right * np.cos(self.dihedral) + D_right * np.sin(self.dihedral)
-        F_side_right = L_right * np.sin(self.dihedral) + D_right * np.cos(self.dihedral)
-        
-        # Total tail forces in Body Frame
-        F_x_tail = -(D_left + D_right) # Drag points backward
-        F_y_tail = F_side_left - F_side_right # Antisymmetric (Yaw)
-        F_z_tail = F_normal_left + F_normal_right # Symmetric (Pitch/Lift)
-        
-        force_body = np.array([F_x_tail, F_y_tail, F_z_tail])
-        
-        # 7. Moments (Force x Arm Length)
-        # Roll moment (differential force from Y)
-        M_x_tail = (F_y_tail * self.arm_length) 
-        # Pitch moment (Z force x arm)
-        M_y_tail = (-F_z_tail * self.arm_length) 
-        # Yaw moment (Y force x arm)
-        M_z_tail = (F_y_tail * self.arm_length)
-        
-        moment_body = np.array([M_x_tail, M_y_tail, M_z_tail])
+        force_body = np.array([
+            -(D_left + D_right),
+            (L_right - L_left) * np.sin(self.dihedral),
+            -(L_left + L_right) * np.cos(self.dihedral),
+        ])
+        # Individual panel moment arms are unknown; use the shared tail arm.
+        moment_body = np.cross(np.array([-self.arm_length, 0.0, 0.0]), force_body)
         
         return force_body, moment_body
     

@@ -4,7 +4,7 @@ import numpy as np
 
 from src.aero.aerodynamics import AeroModel
 from src.dynamics.frames import body_rates_to_euler_rates, rotation_body_to_earth
-from src.dynamics.rotor import RotorModel
+from src.dynamics.rotor import RotorModel, tilted_rotor_position
 from src.dynamics.state import AircraftState
 
 GRAVITY = 9.81
@@ -82,7 +82,7 @@ class TiltrotorDynamics:
         force_body = np.zeros(3, dtype=float)
         moment_body = np.zeros(3, dtype=float)
         total_thrust = 0.0
-        pivot_x = 0.1
+        pivot = getattr(self.mass_props, "tilt_pivot_xz", (0.1, 0.0))
 
         for omega_cmd, position_values in zip(rotor_cmds, position_vectors):
             x, y, z = position_values[:3]
@@ -90,9 +90,7 @@ class TiltrotorDynamics:
             rotor_tilt = tilt_cmd if tilts else 0.0
 
             if tilts:
-                relative_x = x - pivot_x
-                x = pivot_x + relative_x * np.cos(rotor_tilt) + z * np.sin(rotor_tilt)
-                z = -relative_x * np.sin(rotor_tilt) + z * np.cos(rotor_tilt)
+                x, y, z = tilted_rotor_position(position_values, rotor_tilt, pivot)
 
             thrust = self.rotor.compute_thrust(float(omega_cmd), height_above_ground)
             rotor_force = thrust * np.array([np.sin(rotor_tilt), 0.0, -np.cos(rotor_tilt)])

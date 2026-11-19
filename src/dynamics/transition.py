@@ -84,10 +84,11 @@ def solve_longitudinal_trim(
     *,
     tail_limit_rad: float = 0.2,
     residual_tolerance: float = 0.02,
+    max_rotor_omega: float | None = None,
 ) -> dict[str, float | bool | np.ndarray | str]:
     """Solve steady, level longitudinal force and pitch-moment balance.
 
-    The solver varies body angle of attack, equal rotor speed, and symmetric V-tail
+    The solver varies pitch, front and rear pair speeds, and symmetric V-tail
     deflection. A reported trim is feasible only when normalized force and moment
     residuals fall below ``residual_tolerance``.
     """
@@ -100,15 +101,18 @@ def solve_longitudinal_trim(
 
     aero = dynamics.aero
     rotor = dynamics.rotor
+    omega_limit = rotor.max_omega if max_rotor_omega is None else float(max_rotor_omega)
+    if not np.isfinite(omega_limit) or omega_limit <= 0.0 or omega_limit > rotor.max_omega:
+        raise ValueError("trim motor speed limit must be positive and within the rotor model limit")
     chord = max(float(aero.chord), 0.01)
     hover_omega = np.sqrt(dynamics.mass * GRAVITY / max(4.0 * rotor.k_thrust, 1e-12))
-    initial = np.array([0.0, min(hover_omega, rotor.max_omega), 0.0])
-    lower = np.array([-aero.stall_angle, 0.0, -tail_limit_rad])
-    upper = np.array([aero.stall_angle, rotor.max_omega, tail_limit_rad])
+    initial = np.array([0.0, min(hover_omega, omega_limit), min(hover_omega, omega_limit), 0.0])
+    lower = np.array([-aero.stall_angle, 0.0, 0.0, -tail_limit_rad])
+    upper = np.array([aero.stall_angle, omega_limit, omega_limit, tail_limit_rad])
     wind_ned = np.zeros(3)
 
     def evaluate(candidate: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        alpha, omega, tail_deflection = candidate
+        alpha, front_omega, rear_omega, tail_deflection = candidate
         state = AircraftState(
             pos=np.array([0.0, 0.0, -100.0]),
             vel=np.array([airspeed_mps, 0.0, 0.0]),
@@ -118,10 +122,10 @@ def solve_longitudinal_trim(
         dynamics.step(
             state,
             wind_ned,
-            float(omega),
-            float(omega),
-            float(omega),
-            float(omega),
+            float(front_omega),
+            float(front_omega),
+            float(rear_omega),
+            float(rear_omega),
             float(tilt_rad),
             float(tail_deflection),
             float(tail_deflection),
@@ -142,6 +146,7 @@ def solve_longitudinal_trim(
         x_scale=np.array([
             max(float(aero.stall_angle), 1e-3),
             max(float(hover_omega), 1.0),
+            max(float(hover_omega), 1.0),
             max(float(tail_limit_rad), 1e-3),
         ]),
         max_nfev=300,
@@ -154,8 +159,10 @@ def solve_longitudinal_trim(
 
     return {
         "alpha_deg": float(np.rad2deg(result.x[0])),
-        "motor_rpm": float(result.x[1] * 60.0 / (2.0 * np.pi)),
-        "tail_deflection_deg": float(np.rad2deg(result.x[2])),
+        "motor_rpm": float(np.mean(result.x[1:3]) * 60.0 / (2.0 * np.pi)),
+        "front_motor_rpm": float(result.x[1] * 60.0 / (2.0 * np.pi)),
+        "rear_motor_rpm": float(result.x[2] * 60.0 / (2.0 * np.pi)),
+        "tail_deflection_deg": float(np.rad2deg(result.x[3])),
         "acceleration_ned": diagnostic["acceleration_ned"].copy(),
         "moment_body": diagnostic["moment_body"].copy(),
         "angular_acceleration_body": diagnostic["angular_acceleration_body"].copy(),
@@ -175,11 +182,13 @@ def control_effectiveness_map(
     collective_omega: float,
     tail_deflection_rad: float = 0.0,
     *,
+    pair_omegas: tuple[float, float] | None = None,
+    max_rotor_omega: float | None = None,
     tail_limit_rad: float = 0.2,
     rotor_step_rpm: float = 50.0,
     tail_step_deg: float = 5.0,
 ) -> tuple[list[str], np.ndarray]:
-    """Estimate local body-moment effectiveness for rotor and V-tail control inputs."""
+    """Estimate local moment changes around collective or front/rear pair speeds."""
     if dynamics.aero is None:
         raise ValueError("control effectiveness requires an aerodynamic model")
     if airspeed_mps < 0.0 or not 0.0 <= tilt_rad <= np.pi / 2.0:
@@ -194,7 +203,18 @@ def control_effectiveness_map(
         ("V-tail symmetric (±5°)", np.zeros(4), "symmetric"),
         ("V-tail differential (±5°)", np.zeros(4), "differential"),
     ]
-    base_omega = np.full(4, collective_omega, dtype=float)
+    omega_limit = dynamics.rotor.max_omega if max_rotor_omega is None else float(max_rotor_omega)
+    if not np.isfinite(omega_limit) or omega_limit <= 0.0 or omega_limit > dynamics.rotor.max_omega:
+        raise ValueError("motor speed limit must be positive and within the rotor model limit")
+    if pair_omegas is None:
+        base_omega = np.full(4, collective_omega, dtype=float)
+    else:
+        pair_speeds = np.asarray(pair_omegas, dtype=float)
+        if pair_speeds.shape != (2,) or not np.all(np.isfinite(pair_speeds)) or np.any(
+            (pair_speeds < 0.0) | (pair_speeds > omega_limit)
+        ):
+            raise ValueError("pair speeds must be finite and within motor bounds")
+        base_omega = np.repeat(pair_speeds, 2)
     labels: list[str] = []
     effectiveness = np.zeros((3, len(patterns)), dtype=float)
 
@@ -219,8 +239,8 @@ def control_effectiveness_map(
     for column, (label, pattern, kind) in enumerate(patterns):
         labels.append(label)
         if kind == "rotor":
-            plus = np.clip(base_omega + omega_step * pattern, 0.0, dynamics.rotor.max_omega)
-            minus = np.clip(base_omega - omega_step * pattern, 0.0, dynamics.rotor.max_omega)
+            plus = np.clip(base_omega + omega_step * pattern, 0.0, omega_limit)
+            minus = np.clip(base_omega - omega_step * pattern, 0.0, omega_limit)
             moment_plus = evaluate(plus, tail_deflection_rad, tail_deflection_rad)
             moment_minus = evaluate(minus, tail_deflection_rad, tail_deflection_rad)
         elif kind == "symmetric":
@@ -248,6 +268,7 @@ def transition_stability_map(
     tail_limit_rad: float = 0.2,
     perturbation_rad: float = np.deg2rad(0.5),
     trim_residual_tolerance: float = 0.02,
+    max_rotor_omega: float | None = None,
 ) -> dict[str, np.ndarray | tuple[str, ...]]:
     """Map local static-stability derivatives and actuator response over transition.
 
@@ -314,6 +335,8 @@ def transition_stability_map(
     trim_feasible = np.zeros(shape, dtype=bool)
     trim_residual = np.full(shape, np.nan, dtype=float)
     trim_motor_rpm = np.full(shape, np.nan, dtype=float)
+    trim_front_motor_rpm = np.full(shape, np.nan, dtype=float)
+    trim_rear_motor_rpm = np.full(shape, np.nan, dtype=float)
     trim_pitch_moment_residual = np.full(shape, np.nan, dtype=float)
     cm_alpha = np.full(shape, np.nan, dtype=float)
     cl_beta = np.full(shape, np.nan, dtype=float)
@@ -330,7 +353,7 @@ def transition_stability_map(
         alpha: float,
         beta: float,
         tilt: float,
-        rotor_omega: float,
+        pair_omegas: tuple[float, float],
         tail_deflection: float,
     ) -> np.ndarray:
         velocity_body = np.array([
@@ -347,10 +370,10 @@ def transition_stability_map(
         dynamics.step(
             state,
             np.zeros(3),
-            rotor_omega,
-            rotor_omega,
-            rotor_omega,
-            rotor_omega,
+            pair_omegas[0],
+            pair_omegas[0],
+            pair_omegas[1],
+            pair_omegas[1],
             float(tilt),
             float(tail_deflection),
             float(tail_deflection),
@@ -366,10 +389,13 @@ def transition_stability_map(
                 float(tilt),
                 tail_limit_rad=tail_limit_rad,
                 residual_tolerance=trim_residual_tolerance,
+                max_rotor_omega=max_rotor_omega,
             )
             trim_feasible[speed_index, tilt_index] = bool(trim["feasible"])
             trim_residual[speed_index, tilt_index] = float(trim["max_normalized_residual"])
             trim_motor_rpm[speed_index, tilt_index] = float(trim["motor_rpm"])
+            trim_front_motor_rpm[speed_index, tilt_index] = float(trim["front_motor_rpm"])
+            trim_rear_motor_rpm[speed_index, tilt_index] = float(trim["rear_motor_rpm"])
             trim_pitch_moment_residual[speed_index, tilt_index] = float(
                 np.asarray(trim["normalized_residual"], dtype=float)[2]
             )
@@ -377,12 +403,18 @@ def transition_stability_map(
             pitch_rad = float(np.deg2rad(trim["alpha_deg"]))
             tail_deflection = float(np.deg2rad(trim["tail_deflection_deg"]))
             rotor_omega = float(trim["motor_rpm"]) * 2.0 * np.pi / 60.0
+            pair_omegas = (
+                float(trim["front_motor_rpm"]) * 2.0 * np.pi / 60.0,
+                float(trim["rear_motor_rpm"]) * 2.0 * np.pi / 60.0,
+            )
             labels, effectiveness = control_effectiveness_map(
                 dynamics,
                 airspeed_mps=float(airspeed),
                 tilt_rad=float(tilt),
                 alpha_rad=pitch_rad,
                 collective_omega=rotor_omega,
+                pair_omegas=pair_omegas,
+                max_rotor_omega=max_rotor_omega,
                 tail_deflection_rad=tail_deflection,
                 tail_limit_rad=tail_limit_rad,
             )
@@ -410,7 +442,7 @@ def transition_stability_map(
                 alpha_trim + perturbation_rad,
                 beta_trim,
                 float(tilt),
-                rotor_omega,
+                pair_omegas,
                 tail_deflection,
             )
             moment_alpha_minus = evaluate_moment(
@@ -418,7 +450,7 @@ def transition_stability_map(
                 alpha_trim - perturbation_rad,
                 beta_trim,
                 float(tilt),
-                rotor_omega,
+                pair_omegas,
                 tail_deflection,
             )
             moment_beta_plus = evaluate_moment(
@@ -426,7 +458,7 @@ def transition_stability_map(
                 alpha_trim,
                 beta_trim + perturbation_rad,
                 float(tilt),
-                rotor_omega,
+                pair_omegas,
                 tail_deflection,
             )
             moment_beta_minus = evaluate_moment(
@@ -434,7 +466,7 @@ def transition_stability_map(
                 alpha_trim,
                 beta_trim - perturbation_rad,
                 float(tilt),
-                rotor_omega,
+                pair_omegas,
                 tail_deflection,
             )
             moment_scale_pitch = q_bar * wing_area * reference_chord
@@ -464,6 +496,8 @@ def transition_stability_map(
         "trim_feasible": trim_feasible,
         "trim_residual": trim_residual,
         "trim_motor_rpm": trim_motor_rpm,
+        "trim_front_motor_rpm": trim_front_motor_rpm,
+        "trim_rear_motor_rpm": trim_rear_motor_rpm,
         "trim_pitch_moment_residual": trim_pitch_moment_residual,
         "coefficient_valid": coefficient_valid,
         "assessment_mask": assessment_mask,
@@ -482,6 +516,24 @@ def assess_motor_electrical_point(
     The estimate requires explicit motor, propeller, ESC, and battery data. It is
     an engineering screen, not a substitute for measured propulsion maps.
     """
+    if rotor_count <= 0 or not np.isfinite(motor_rpm) or motor_rpm < 0.0:
+        raise ValueError("rotor count must be positive and motor RPM must be finite and non-negative")
+    return assess_rotor_electrical_point(np.full(rotor_count, motor_rpm), parameters)
+
+
+def assess_rotor_electrical_point(
+    motor_rpms: list[float] | np.ndarray,
+    parameters: Mapping[str, float | int | None],
+) -> dict[str, float | bool | tuple[str, ...]]:
+    """Screen individual motor currents and their combined battery demand."""
+    motor_rpms = np.asarray(motor_rpms, dtype=float)
+    if (
+        motor_rpms.ndim != 1
+        or motor_rpms.size == 0
+        or not np.all(np.isfinite(motor_rpms))
+        or np.any(motor_rpms < 0.0)
+    ):
+        raise ValueError("motor RPMs must be a non-empty finite non-negative sequence")
     required = (
         "motor_kv_rpm_per_volt",
         "motor_resistance_ohm",
@@ -513,8 +565,6 @@ def assess_motor_electrical_point(
     values = {name: float(parameters[name]) for name in required}
     if not all(np.isfinite(value) for value in values.values()):
         raise ValueError("electrical parameters must be finite")
-    if rotor_count <= 0 or motor_rpm < 0.0:
-        raise ValueError("rotor count must be positive and motor RPM cannot be negative")
     if (
         values["motor_kv_rpm_per_volt"] <= 0.0
         or values["motor_resistance_ohm"] < 0.0
@@ -533,7 +583,7 @@ def assess_motor_electrical_point(
 
     kv = values["motor_kv_rpm_per_volt"]
     motor_torque_constant = 60.0 / (2.0 * np.pi * kv)
-    angular_speed = motor_rpm * 2.0 * np.pi / 60.0
+    angular_speed = motor_rpms * 2.0 * np.pi / 60.0
     propeller_torque = (
         values["propeller_torque_coefficient_nm_s2_rad2"] * angular_speed**2
     )
@@ -542,11 +592,11 @@ def assess_motor_electrical_point(
         + values["motor_no_load_current_a"]
     )
     motor_voltage = (
-        motor_rpm / kv
+        motor_rpms / kv
         + motor_current * values["motor_resistance_ohm"]
     )
     motor_power = motor_voltage * motor_current
-    battery_power = rotor_count * motor_power / values["esc_efficiency"]
+    battery_power = float(np.sum(motor_power)) / values["esc_efficiency"]
     battery_resistance = values["battery_internal_resistance_ohm"]
     nominal_voltage = values["battery_nominal_voltage_v"]
     discriminant = nominal_voltage**2 - 4.0 * battery_resistance * battery_power
@@ -567,16 +617,16 @@ def assess_motor_electrical_point(
         values["battery_continuous_current_a"],
     )
     feasible = bool(
-        motor_current <= values["motor_continuous_current_a"]
-        and motor_current <= values["esc_continuous_current_a"]
+        np.all(motor_current <= values["motor_continuous_current_a"])
+        and np.all(motor_current <= values["esc_continuous_current_a"])
         and battery_current <= battery_current_limit
-        and motor_voltage <= battery_voltage
+        and np.all(motor_voltage <= battery_voltage)
     )
     return {
         "assessed": True,
         "feasible": feasible,
         "missing_parameters": (),
-        "motor_current_a": float(motor_current),
+        "motor_current_a": float(np.max(motor_current)),
         "battery_current_a": float(battery_current),
         "battery_voltage_v": float(battery_voltage),
     }
@@ -634,6 +684,17 @@ def constrained_transition_corridor(
         raise ValueError("tilt rate and transition duration must be positive; gust margin cannot be negative")
     if dynamics.aero is None:
         raise ValueError("constrained corridor requires an aerodynamic model")
+    if len(rotor_tilts) != 4:
+        raise ValueError("constrained corridor requires four rotors")
+    if (
+        not np.isfinite(max_thrust_per_rotor)
+        or max_thrust_per_rotor < 0.0
+        or not np.isfinite(dynamics.rotor.k_thrust)
+        or dynamics.rotor.k_thrust <= 0.0
+        or not np.isfinite(dynamics.rotor.max_omega)
+        or dynamics.rotor.max_omega <= 0.0
+    ):
+        raise ValueError("rotor thrust limit and model parameters must be finite and valid")
 
     envelope = transition_speed_envelope(
         mass=dynamics.mass,
@@ -650,12 +711,19 @@ def constrained_transition_corridor(
     if not np.allclose(envelope["tilt_deg"], tilts):
         raise ValueError("tilt grid must match the analytic envelope grid")
 
+    trim_omega_limit = None
+    if max_thrust_per_rotor > 0.0:
+        trim_omega_limit = min(
+            float(dynamics.rotor.max_omega),
+            float(np.sqrt(max_thrust_per_rotor / dynamics.rotor.k_thrust)),
+        )
     stability = transition_stability_map(
         dynamics,
         airspeeds_mps=speeds,
         tilt_angles_rad=np.deg2rad(tilts),
         tail_limit_rad=tail_limit_rad,
         trim_residual_tolerance=trim_residual_tolerance,
+        max_rotor_omega=trim_omega_limit,
     )
     speed_grid = speeds[:, np.newaxis]
     minimum_speed = envelope["minimum_speed_mps"][np.newaxis, :]
@@ -671,6 +739,12 @@ def constrained_transition_corridor(
         & (speed_grid <= maximum_speed - gust_speed_margin_mps)
     )
     trim_mask = np.asarray(stability["trim_feasible"], dtype=bool)
+    pair_max_rpm = np.maximum(
+        np.asarray(stability["trim_front_motor_rpm"], dtype=float),
+        np.asarray(stability["trim_rear_motor_rpm"], dtype=float),
+    )
+    max_rpm_from_thrust = np.sqrt(max_thrust_per_rotor / dynamics.rotor.k_thrust) * 60.0 / (2.0 * np.pi)
+    rotor_thrust_mask = np.isfinite(pair_max_rpm) & (pair_max_rpm <= max_rpm_from_thrust + 1e-6)
     pitch_residual = np.asarray(
         stability["trim_pitch_moment_residual"],
         dtype=float,
@@ -696,6 +770,7 @@ def constrained_transition_corridor(
     known_constraints_mask = (
         gust_mask
         & trim_mask
+        & rotor_thrust_mask
         & pitch_moment_mask
         & static_stability_mask
         & actuator_rate_mask
@@ -710,9 +785,11 @@ def constrained_transition_corridor(
         slew_limit = float(motor_slew_rate)
         if not np.isfinite(slew_limit) or slew_limit <= 0.0:
             raise ValueError("motor slew rate must be positive and finite")
-        trim_rpm = np.asarray(stability["trim_motor_rpm"], dtype=float)
+        trim_front_rpm = np.asarray(stability["trim_front_motor_rpm"], dtype=float)
+        trim_rear_rpm = np.asarray(stability["trim_rear_motor_rpm"], dtype=float)
         if np.isclose(speeds[0], 0.0):
-            initial_rpm = trim_rpm[0, 0]
+            initial_front_rpm = trim_front_rpm[0, 0]
+            initial_rear_rpm = trim_rear_rpm[0, 0]
             initial_trim_feasible = bool(trim_mask[0, 0])
         else:
             hover_trim = solve_longitudinal_trim(
@@ -721,17 +798,23 @@ def constrained_transition_corridor(
                 0.0,
                 tail_limit_rad=tail_limit_rad,
                 residual_tolerance=trim_residual_tolerance,
+                max_rotor_omega=trim_omega_limit,
             )
-            initial_rpm = float(hover_trim["motor_rpm"])
+            initial_front_rpm = float(hover_trim["front_motor_rpm"])
+            initial_rear_rpm = float(hover_trim["rear_motor_rpm"])
             initial_trim_feasible = bool(hover_trim["feasible"])
-        if initial_trim_feasible and np.isfinite(initial_rpm):
+        if initial_trim_feasible and np.isfinite(initial_front_rpm) and np.isfinite(initial_rear_rpm):
             motor_slew_assessed = (
                 analytic_mask
                 & trim_mask
                 & pitch_moment_mask
-                & np.isfinite(trim_rpm)
+                & np.isfinite(trim_front_rpm)
+                & np.isfinite(trim_rear_rpm)
             )
-            required_average_slew = np.abs(trim_rpm - initial_rpm) / transition_duration_s
+            required_average_slew = np.maximum(
+                np.abs(trim_front_rpm - initial_front_rpm),
+                np.abs(trim_rear_rpm - initial_rear_rpm),
+            ) / transition_duration_s
             motor_slew_feasible = motor_slew_assessed & (
                 required_average_slew <= slew_limit
             )
@@ -747,18 +830,19 @@ def constrained_transition_corridor(
                 electrical_parameters,
             )["missing_parameters"]
         )
-        trim_rpm = np.asarray(stability["trim_motor_rpm"], dtype=float)
+        trim_front_rpm = np.asarray(stability["trim_front_motor_rpm"], dtype=float)
+        trim_rear_rpm = np.asarray(stability["trim_rear_motor_rpm"], dtype=float)
         for index in np.ndindex(analytic_mask.shape):
             if (
                 not analytic_mask[index]
                 or not trim_mask[index]
                 or not pitch_moment_mask[index]
-                or not np.isfinite(trim_rpm[index])
+                or not np.isfinite(trim_front_rpm[index])
+                or not np.isfinite(trim_rear_rpm[index])
             ):
                 continue
-            point = assess_motor_electrical_point(
-                float(trim_rpm[index]),
-                len(rotor_tilts),
+            point = assess_rotor_electrical_point(
+                np.repeat([trim_front_rpm[index], trim_rear_rpm[index]], 2),
                 electrical_parameters,
             )
             electrical_assessed[index] = bool(point["assessed"])
@@ -779,6 +863,7 @@ def constrained_transition_corridor(
         "analytic_mask": analytic_mask,
         "gust_mask": gust_mask,
         "trim_mask": trim_mask,
+        "rotor_thrust_mask": rotor_thrust_mask,
         "pitch_moment_mask": pitch_moment_mask,
         "static_stability_mask": static_stability_mask,
         "actuator_rate_mask": actuator_rate_mask,

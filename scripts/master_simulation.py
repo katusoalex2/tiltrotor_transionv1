@@ -22,9 +22,9 @@ class PIDCascade:
     def __init__(self, mass, k_thrust):
         self.mass = mass
         self.k_thrust = k_thrust
-        self.alt_pid = PIDController(kp=0.1, ki=0.005, kd=0.1, limit=0.25)
+        self.alt_pid = PIDController(kp=1.5, ki=0.05, kd=0.8, limit=1)
         self.speed_pid = PIDController(kp=0.03, ki=0.002, kd=0.01, limit=0.20)
-        self.pitch_pid = PIDController(kp=0.6, ki=0.05, kd=0.4, limit=0.2)
+        self.pitch_pid = PIDController(kp=6, ki=-0.5, kd=1, limit=0.2)
 
     def compute(self, t, state, ref_alt, ref_speed, ref_tilt):
         current_alt = -state.pos[2]

@@ -1,6 +1,7 @@
 """Rigorous Mass Properties, Inertia Tensor, and Stability."""
 import numpy as np
 import yaml
+from src.dynamics.rotor import tilted_rotor_position
 
 class MassProperties:
     def __init__(self, config_path="configs/blue_uam.yaml"):
@@ -24,6 +25,7 @@ class MassProperties:
         self.vtail_arm = cfg.get('vtail_arm_length', 0.5)
         
         self.motor_positions = cfg.get('motor_positions', [[0.3, 0.4, 0.0, True], [0.3, -0.4, 0.0, True], [-0.3, 0.4, 0.0, False], [-0.3, -0.4, 0.0, False]])
+        self.tilt_pivot_xz = (0.1, 0.0)
         
         # Aerodynamic Centers
         self.mac, self.ac_wing_x = self._calculate_mac_and_ac()
@@ -71,15 +73,10 @@ class MassProperties:
         I += self.mass_vtail * (self.vtail_arm**2) * np.diag([1.0, 0.1, 1.0])
         
         tilt_rad = np.deg2rad(tilt_angle_deg)
-        pivot_x = 0.1
         for pos in self.motor_positions:
             pos_x, pos_y, pos_z, tilts = pos
             if tilts:
-                rel_x = pos_x - pivot_x
-                rel_z = pos_z
-                new_rel_x = rel_x * np.cos(tilt_rad) + rel_z * np.sin(tilt_rad)
-                new_rel_z = -rel_x * np.sin(tilt_rad) + rel_z * np.cos(tilt_rad)
-                actual_pos = np.array([pivot_x + new_rel_x, pos_y, new_rel_z])
+                actual_pos = tilted_rotor_position(pos, tilt_rad, self.tilt_pivot_xz)
             else:
                 actual_pos = np.array([pos_x, pos_y, pos_z])
             r_sq = np.dot(actual_pos, actual_pos)

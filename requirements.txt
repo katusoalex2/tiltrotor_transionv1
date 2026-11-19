@@ -9,3 +9,6 @@ casadi
 trimesh
 openpyxl
 defusedxml
+python-docx
+reportlab
+kaleido

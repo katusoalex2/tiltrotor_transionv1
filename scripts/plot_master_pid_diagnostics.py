@@ -1,0 +1,170 @@
+"""Exploratory four-rotor PID diagnostics; not a flight-ready controller."""
+
+import json
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from src.aero.aerodynamics import AeroModel
+from src.aero.vtail import VtailModel
+from src.control.architecture import ControlLawArchitecture
+from src.control.trajectory import ReferenceTrajectory
+from src.dynamics.rotor import RotorModel
+from src.dynamics.state import AircraftState
+from src.dynamics.tiltrotor import TiltrotorDynamics
+from src.wind.gust import DrydenGust
+
+
+PROFILE_PATH = ROOT / "figures" / "KADA UAM aircraft_profile.json"
+CORRIDOR_PATH = ROOT / "configs" / "robust_corridor.csv"
+OUTPUT_PATH = ROOT / "simulation_results" / "master_pid_diagnostics.png"
+
+# The profile says 3000 RPM; 3000 rad/s is a separate, unverified assumption.
+ASSUMED_MAX_OMEGA_RAD_S = 3000.0
+ALTITUDE_GAINS = {"kp": 1.5, "ki": 0.05, "kd": 0.8}
+SPEED_GAINS = {"kp": 0.0, "ki": 0.0, "kd": 0.01}
+ATTITUDE_GAINS = {"kp": 10.0, "ki": 0.0, "kd": 0.1}
+RATE_GAINS = {"kp": 3.0, "ki": 0.1, "kd": 0.02}
+
+
+def simulate(duration=20.0, dt=0.01, pitch_limit_deg=60.0):
+    with PROFILE_PATH.open(encoding="utf-8") as file:
+        aircraft = json.load(file)["aircraft"]
+    masses = aircraft["mass_properties"]["component_masses_kg"]
+    rotors = aircraft["geometry"]["rotors"]
+    mass = masses["fuselage"] + masses["wing"] + masses["vtail"] + len(rotors) * masses["motor"]
+    positions = tuple((*rotor["position_m"], rotor["tilt_enabled"]) for rotor in rotors)
+    propulsion = aircraft["propulsion"]
+    k_thrust = propulsion["propeller"]["thrust_coefficient_n_s2_rad2"]
+    rotor = RotorModel(k_thrust, ASSUMED_MAX_OMEGA_RAD_S)
+    tail_config = aircraft["geometry"]["vtail"]
+    vtail = VtailModel(tail_config["area_m2"], tail_config["arm_m"])
+    aero_config = aircraft["aerodynamics"]
+    aero = AeroModel(
+        aero_config["reference_area_m2"],
+        vtail,
+        prop_diameter_m=propulsion["propeller"]["diameter_in"] * 0.0254,
+    )
+    aero.AR = aero_config["aspect_ratio"]
+    aero.CL_alpha = aero_config["lift_curve_slope_per_rad"]
+    aero.CD_0 = aero_config["zero_lift_drag_coefficient"]
+    aero.stall_angle = np.deg2rad(aero_config["stall_angle_deg"])
+    inertia = np.asarray(aircraft["mass_properties"]["inertia_tensor_kg_m2"])
+    dynamics = TiltrotorDynamics(mass, rotor, inertia=inertia, aero=aero)
+    controller = ControlLawArchitecture(
+        mass,
+        k_thrust,
+        ASSUMED_MAX_OMEGA_RAD_S,
+        positions,
+        vtail_model=vtail,
+        aero_model=aero,
+        tilt_pivot_xz=aircraft["geometry"]["tilt_axis_xz_m"],
+        altitude_gains=ALTITUDE_GAINS,
+        speed_gains=SPEED_GAINS,
+        attitude_gains=ATTITUDE_GAINS,
+        rate_gains=RATE_GAINS,
+        max_moment_nm=25.0,
+    )
+    trajectory = ReferenceTrajectory(str(CORRIDOR_PATH), speed_max=12.0)
+    wind = DrydenGust(sigma=(3.5, 3.5, 2.1), airspeed=12.0, seed=99)
+    max_tilt_step = np.deg2rad(aircraft["actuators"]["tilt"]["maximum_rate_deg_s"]) * dt
+    state = AircraftState(pos=np.array([0.0, 0.0, -100.0]))
+    log = {name: [] for name in (
+        "time", "north", "east", "north_speed", "east_speed", "altitude",
+        "reference_altitude", "climb_rate", "roll", "roll_rate", "pitch",
+        "tilt", "reference_tilt",
+    )}
+    stop_reason = None
+    for i in range(round(duration / dt)):
+        time = i * dt
+        ref = trajectory.at(time)
+        wind_ned = wind.step(dt)
+        tilt = float(np.clip(ref["tilt"], state.tilt - max_tilt_step, state.tilt + max_tilt_step))
+        limited_ref = {**ref, "tilt": tilt}
+        command = controller.compute(state, limited_ref, dt, wind_ned, actuator_tilt_rad=tilt)
+        state = dynamics.step(
+            state, wind_ned,
+            command["omega_fl"], command["omega_fr"], command["omega_rl"], command["omega_rr"],
+            command["tilt"], command["delta_left"], command["delta_right"], dt,
+        )
+        values = np.concatenate((state.pos, state.vel, state.att, state.omega, [state.tilt]))
+        if not np.all(np.isfinite(values)):
+            stop_reason = f"non-finite state at {time + dt:.2f} s"
+            break
+        actual_time = time + dt
+        actual_ref = trajectory.at(actual_time)
+        sample = (
+            actual_time, state.pos[0], state.pos[1], state.vel[0], state.vel[1],
+            -state.pos[2], actual_ref["altitude"], -state.vel[2],
+            np.rad2deg(state.att[0]), np.rad2deg(state.omega[0]),
+            np.rad2deg(state.att[1]), np.rad2deg(state.tilt), np.rad2deg(actual_ref["tilt"]),
+        )
+        for key, value in zip(log, sample):
+            log[key].append(float(value))
+        if abs(state.att[1]) >= np.deg2rad(pitch_limit_deg):
+            stop_reason = f"pitch exceeded {pitch_limit_deg:g} deg at {actual_time:.2f} s"
+            break
+        if state.pos[2] >= 0.0:
+            stop_reason = f"altitude reached ground at {actual_time:.2f} s"
+            break
+    return {name: np.asarray(values) for name, values in log.items()}, stop_reason
+
+
+def plot_results(log, stop_reason, output_path=OUTPUT_PATH):
+    if not len(log["time"]):
+        raise ValueError("simulation produced no finite samples")
+    fig, axes = plt.subplots(5, 2, figsize=(12, 14), sharex=True)
+    panels = (
+        ("north", "North position (m)"), ("north_speed", "North velocity (m/s)"),
+        ("east", "East position (m)"), ("east_speed", "East velocity (m/s)"),
+        ("altitude", "Altitude (m)"), ("climb_rate", "Climb rate (m/s)"),
+        ("roll", "Roll (deg)"), ("roll_rate", "Roll rate (deg/s)"),
+        ("pitch", "Pitch (deg)"), ("tilt", "Nacelle tilt (deg)"),
+    )
+    for ax, (key, label) in zip(axes.flat, panels):
+        ax.plot(log["time"], log[key], color="tab:blue", label="Simulated")
+        if key == "altitude":
+            ax.plot(log["time"], log["reference_altitude"], "k--", label="Corridor reference")
+        if key == "tilt":
+            ax.plot(log["time"], log["reference_tilt"], "k--", label="Requested tilt")
+        if key in ("altitude", "tilt"):
+            ax.legend(fontsize=8)
+        if stop_reason:
+            ax.axvline(log["time"][-1], color="tab:red", linestyle=":", linewidth=1)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+    for ax in axes[-1]:
+        ax.set_xlabel("Time (s)")
+    status = f"STOPPED: {stop_reason}" if stop_reason else "Completed requested duration"
+    fig.suptitle("Four-rotor PID diagnostics — exploratory simulation only\n" + status)
+    fig.text(
+        0.5, 0.01,
+        "Truth-fed model; 3000 rad/s motor limit assumed, not verified. Not flight-ready.",
+        ha="center", color="darkred", fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.025, 1, 0.95))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def main():
+    log, stop_reason = simulate()
+    plot_results(log, stop_reason)
+    error = log["altitude"] - log["reference_altitude"]
+    print(f"Saved diagnostic plot: {OUTPUT_PATH}")
+    print(f"Maximum altitude error before stop: {np.max(np.abs(error)):.2f} m")
+    print(f"Final tilt: {log['tilt'][-1]:.1f} deg; requested: {log['reference_tilt'][-1]:.1f} deg")
+    if stop_reason:
+        print(f"Simulation stopped: {stop_reason}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

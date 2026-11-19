@@ -27,6 +27,7 @@ class ControlLawArchitecture:
         vtail_model=None,
         *,
         aero_model=None,
+        tilt_pivot_xz=(0.1, 0.0),
         altitude_gains: dict[str, float] | None = None,
         speed_gains: dict[str, float] | None = None,
         attitude_gains: dict[str, float] | None = None,
@@ -93,6 +94,7 @@ class ControlLawArchitecture:
             k_thrust=k_thrust,
             max_omega=max_omega,
             motor_positions=self.motor_positions,
+            tilt_pivot_xz=tilt_pivot_xz,
         )
         self.last_allocation_matrix = np.zeros((4, 6), dtype=float)
         self.last_allocation_residual = np.zeros(4, dtype=float)
@@ -127,6 +129,13 @@ class ControlLawArchitecture:
             -np.deg2rad(25.0),
             np.deg2rad(25.0),
         ))
+        
+        # Angle-of-attack limiter: constrain pitch based on tilt to avoid excessive AoA
+        # At high tilt angles, pitch ≈ AoA, so we must limit pitch more aggressively
+        tilt_sin = np.sin(float(state.tilt))
+        # Aggressively reduce max pitch: 25° at hover, ~5° at cruise to stay within 12° AoA
+        max_pitch_for_aoa = np.deg2rad(25.0 - 20.0 * tilt_sin)
+        desired_pitch = float(np.clip(desired_pitch, -max_pitch_for_aoa, max_pitch_for_aoa))
 
         current_yaw = float(state.att[2])
         current_north, current_east = float(state.pos[0]), float(state.pos[1])
