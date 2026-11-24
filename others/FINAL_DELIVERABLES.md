@@ -29,6 +29,28 @@ It is a stationary schematic, not simulated motion or flight evidence; it does
 not enforce actuator or aerodynamic limits and is excluded from simulation
 reports. Physical simulation results and warnings remain separate.
 
+## Additional interactive transition analyses
+
+Use the **Additional interactive transition analyses** section in Phase 5, or
+the jump link near the top of the dashboard. The selector provides:
+
+- Cosine and linear reference schedules, tilt-rate limits, and both angle
+  conventions. These controls do not change the main simulation.
+- Fixed-hover-speed force and acceleration sweeps using the current dashboard
+  aircraft; the sweeps exclude rotor wash and tail forces and are not trim.
+- An analytical tilt-speed screen with either tilt convention. Its separate
+  maximum-thrust checks do not establish simultaneous trim or flight safety.
+- An on-demand reduced longitudinal optimization. This uses its own fixed
+  5 kg, 1.5 m², 15 s scenario, not the dashboard aircraft; it omits moments,
+  rotor wash, gusts and electrical limits.
+- An on-demand exploratory PID diagnostic with altitude-gain and gust inputs.
+  It uses the illustrative KADA profile and an unverified 3000 rad/s motor
+  limit, not the dashboard aircraft or PID controls. Results stop at the pitch
+  or ground limit, and changing inputs requires a new run.
+
+The additional charts are interactive but are not included in the downloadable
+simulation report. They are simulation studies, not validated flight controls.
+
 ## Test Status
 
 Latest local run: `python -m pytest -q -p no:cacheprovider` — **121 passed**.

@@ -70,6 +70,7 @@ from src.simulation.failures import ACTUATOR_CHANNELS
 from src.simulation.monte_carlo import MonteCarloValidator
 from src.simulation.report import ReportItem, SimulationReport
 from src.simulation.transition_targets import assess_transition_targets
+from scripts.dashboard_transition_analyses import render_transition_analyses
 
 st.set_page_config(page_title="KADA UAM Transition phase configurators _kONKUK", layout="wide")
 
@@ -149,6 +150,7 @@ GUST_DIRECTION_VECTORS = {
 }
 
 st.title("KADA UAM Transition phase configurators _kONKUK")
+st.markdown("[Jump to additional interactive transition analyses](#additional-interactive-transition-analyses)")
 
 
 st.sidebar.title("Aircraft and mission setup")
@@ -2086,6 +2088,8 @@ analysis_dynamics = TiltrotorDynamics(
     mass_props=props,
     aero=analysis_aero,
 )
+
+render_transition_analyses(analysis_dynamics, max_tilt_rate_deg_s)
 
 analysis_speed_col, analysis_tilt_col = st.columns(2)
 analysis_speed = analysis_speed_col.slider(

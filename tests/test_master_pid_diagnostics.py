@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from scripts import plot_master_pid_diagnostics as diagnostics
 
@@ -31,3 +32,17 @@ def test_simulation_stops_when_pitch_limit_is_exceeded():
     assert abs(log["pitch"][-1]) >= 1.0
     assert all(len(values) == len(log["time"]) for values in log.values())
     assert np.all(np.isfinite(log["altitude"]))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"duration": 0.0},
+        {"dt": 0.0},
+        {"pitch_limit_deg": 90.0},
+        {"gust_sigma": -1.0},
+    ],
+)
+def test_simulation_rejects_invalid_diagnostic_inputs(kwargs):
+    with pytest.raises(ValueError):
+        diagnostics.simulate(**kwargs)

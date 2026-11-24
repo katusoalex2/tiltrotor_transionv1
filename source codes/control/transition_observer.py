@@ -52,10 +52,10 @@ class TransitionStateObserver:
         if not np.isfinite(dt) or dt <= 0.0:
             raise ValueError("observer time step must be positive and finite")
 
-        position = self._vector(state.pos, "position")
-        velocity = self._vector(state.vel, "velocity")
-        attitude = self._vector(state.att, "attitude")
-        body_rates = self._vector(state.omega, "body rates")
+        position = self._vector(state.pos, "position") # NED position in meters
+        velocity = self._vector(state.vel, "velocity") # NED velocity in m/s
+        attitude = self._vector(state.att, "attitude") # roll, pitch, yaw in radians
+        body_rates = self._vector(state.omega, "body rates") # p, q, r in rad/s
         wind = np.zeros(3, dtype=float) if wind_earth is None else self._vector(wind_earth, "wind")
         tilt = float(state.tilt)
         if not np.isfinite(tilt) or not 0.0 <= tilt <= np.pi / 2.0:

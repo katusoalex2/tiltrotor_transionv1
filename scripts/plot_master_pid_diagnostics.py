@@ -1,4 +1,64 @@
-"""Exploratory four-rotor PID diagnostics; not a flight-ready controller."""
+flowchart TB
+    U(["User"]) --> DASH["Dashboard<br/>scripts/dashboard.py"]
+    U --> STAND["Standalone scripts<br/>scripts/"]
+    U --> TEST["Tests<br/>tests/"]
+
+    subgraph INPUTS["Inputs and configuration"]
+        PROFILE["Aircraft profile<br/>YAML / JSON / Excel"]
+        PARAM["Geometry, mass, inertia,<br/>propulsion and PID gains"]
+        MISSION["Mission, tilt reference<br/>and operating limits"]
+        WIND["Wind and gust settings"]
+    end
+
+    PROFILE --> DASH
+    DASH --> PARAM
+    DASH --> MISSION
+    DASH --> WIND
+
+    subgraph CORE["Main dashboard simulation"]
+        CONTROL["Guidance and control<br/>src/control/"]
+        ALLOC["Control allocation<br/>src/allocation/"]
+        PHYSICS["6-DOF aircraft dynamics<br/>src/dynamics/"]
+        AERO["Wing and V-tail aerodynamics<br/>src/aero/"]
+        DIST["Wind models<br/>src/wind/"]
+        STATE["AircraftState<br/>position, velocity, attitude, rates, tilt"]
+        CONTROL --> ALLOC
+        ALLOC -->|"rotor, tilt and tail commands"| PHYSICS
+        AERO -->|"forces and moments"| PHYSICS
+        DIST -->|"wind"| CONTROL
+        DIST -->|"wind"| PHYSICS
+        PHYSICS -->|"next state"| STATE
+        STATE -->|"feedback"| CONTROL
+    end
+
+    PARAM --> CONTROL
+    PARAM --> PHYSICS
+    MISSION --> CONTROL
+    WIND --> DIST
+    DASH -->|"run_simulation"| CORE
+    CORE --> LOG["Recorded samples and diagnostics"]
+    LOG --> RESULTS["Dashboard graphs, targets,<br/>corridor and stability assessments"]
+    RESULTS --> REPORT["Optional Word / PDF report"]
+
+    subgraph STUDIES["Additional analyses: separate workflows"]
+        SCHED["Cosine / linear tilt references"]
+        FORCES["Fixed-speed force sweeps"]
+        ENVELOPE["Analytical envelope,<br/>trim and constrained corridor"]
+        OPT["Reduced longitudinal and<br/>multi-corridor optimization"]
+        MC["Monte Carlo, gust and<br/>controller comparisons"]
+        PID["Exploratory four-rotor PID diagnostic"]
+    end
+
+    DASH -. "interactive studies" .-> STUDIES
+    STAND --> STUDIES
+    PARAM -. "selected studies" .-> STUDIES
+    STUDIES --> CURVES["Study-specific curves and data"]
+    CURVES --> U
+    RESULTS --> U
+    REPORT --> U
+    DASH -.-> PX4["Optional PX4 SITL mapping draft<br/>not actuator commands or firmware"]
+    TEST -. "checks selected components" .-> CORE
+    TEST -. "checks selected studies" .-> STUDIES"""Exploratory four-rotor PID diagnostics; not a flight-ready controller."""
 
 import json
 import sys
@@ -32,7 +92,23 @@ ATTITUDE_GAINS = {"kp": 10.0, "ki": 0.0, "kd": 0.1}
 RATE_GAINS = {"kp": 3.0, "ki": 0.1, "kd": 0.02}
 
 
-def simulate(duration=20.0, dt=0.01, pitch_limit_deg=60.0):
+def simulate(
+    duration=20.0,
+    dt=0.01,
+    pitch_limit_deg=60.0,
+    *,
+    altitude_gains=None,
+    gust_sigma=3.5,
+    gust_seed=99,
+):
+    if not np.isfinite(duration) or duration <= 0 or not np.isfinite(dt) or dt <= 0:
+        raise ValueError("duration and time step must be positive and finite")
+    if not np.isfinite(pitch_limit_deg) or not 0 < pitch_limit_deg < 90:
+        raise ValueError("pitch limit must be finite and between 0 and 90 degrees")
+    if not np.isfinite(gust_sigma) or gust_sigma < 0:
+        raise ValueError("gust sigma must be finite and non-negative")
+    if round(duration / dt) < 1:
+        raise ValueError("duration must include at least one simulation step")
     with PROFILE_PATH.open(encoding="utf-8") as file:
         aircraft = json.load(file)["aircraft"]
     masses = aircraft["mass_properties"]["component_masses_kg"]
@@ -64,20 +140,24 @@ def simulate(duration=20.0, dt=0.01, pitch_limit_deg=60.0):
         vtail_model=vtail,
         aero_model=aero,
         tilt_pivot_xz=aircraft["geometry"]["tilt_axis_xz_m"],
-        altitude_gains=ALTITUDE_GAINS,
+        altitude_gains=ALTITUDE_GAINS if altitude_gains is None else altitude_gains,
         speed_gains=SPEED_GAINS,
         attitude_gains=ATTITUDE_GAINS,
         rate_gains=RATE_GAINS,
         max_moment_nm=25.0,
     )
     trajectory = ReferenceTrajectory(str(CORRIDOR_PATH), speed_max=12.0)
-    wind = DrydenGust(sigma=(3.5, 3.5, 2.1), airspeed=12.0, seed=99)
+    wind = DrydenGust(
+        sigma=(gust_sigma, gust_sigma, gust_sigma * 0.6),
+        airspeed=12.0,
+        seed=gust_seed,
+    )
     max_tilt_step = np.deg2rad(aircraft["actuators"]["tilt"]["maximum_rate_deg_s"]) * dt
     state = AircraftState(pos=np.array([0.0, 0.0, -100.0]))
     log = {name: [] for name in (
         "time", "north", "east", "north_speed", "east_speed", "altitude",
         "reference_altitude", "climb_rate", "roll", "roll_rate", "pitch",
-        "tilt", "reference_tilt",
+        "tilt", "reference_tilt", "yaw", "pitch_rate", "yaw_rate", "wind",
     )}
     stop_reason = None
     for i in range(round(duration / dt)):
@@ -103,6 +183,8 @@ def simulate(duration=20.0, dt=0.01, pitch_limit_deg=60.0):
             -state.pos[2], actual_ref["altitude"], -state.vel[2],
             np.rad2deg(state.att[0]), np.rad2deg(state.omega[0]),
             np.rad2deg(state.att[1]), np.rad2deg(state.tilt), np.rad2deg(actual_ref["tilt"]),
+            np.rad2deg(state.att[2]), np.rad2deg(state.omega[1]),
+            np.rad2deg(state.omega[2]), np.linalg.norm(wind_ned),
         )
         for key, value in zip(log, sample):
             log[key].append(float(value))
@@ -123,7 +205,7 @@ def plot_results(log, stop_reason, output_path=OUTPUT_PATH):
         ("north", "North position (m)"), ("north_speed", "North velocity (m/s)"),
         ("east", "East position (m)"), ("east_speed", "East velocity (m/s)"),
         ("altitude", "Altitude (m)"), ("climb_rate", "Climb rate (m/s)"),
-        ("roll", "Roll (deg)"), ("roll_rate", "Roll rate (deg/s)"),
+        ("roll", "Roll (deg)"), ("roll_rate", "Body roll rate p (deg/s)"),
         ("pitch", "Pitch (deg)"), ("tilt", "Nacelle tilt (deg)"),
     )
     for ax, (key, label) in zip(axes.flat, panels):

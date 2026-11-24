@@ -1,4 +1,5 @@
-"""CasADi codegen controller using CodeGenerator (safer than Function.generate)."""
+"""CasADi codegen controller using CodeGenerator."""
+#lacking  uam trumming trim control 
 
 import casadi as ca
 
@@ -23,6 +24,7 @@ alt_d = 0.1 * (0 - state_sym[5])
 pitch_from_alt = alt_p + alt_i + alt_d
 
 # Speed PID
+#need to define the specific speed we are talking about (e.g., airspeed or groundspeed) or forward speed or sideways speed or etc.
 speed_error = ref_speed - current_speed
 pitch_from_speed = -0.03 * speed_error
 
