@@ -3,7 +3,7 @@
 import numpy as np
 
 from src.aero.aerodynamics import AeroModel
-from src.dynamics.frames import body_rates_to_euler_rates, rotation_body_to_earth
+from src.dynamics.frames import body_rates_to_euler_rates, rotation_body_to_earth, rotation_body_to_wind
 from src.dynamics.rotor import RotorModel, tilted_rotor_position
 from src.dynamics.state import AircraftState
 
@@ -137,7 +137,7 @@ class TiltrotorDynamics:
         )
 
         if self.aero is not None:
-            aero_force, aero_moment, V_T, alpha, _ = self.aero.compute_forces_and_moments(state.vel, wind_earth, state.att, total_thrust, tilt_cmd)
+            aero_force, aero_moment, V_T, alpha, beta = self.aero.compute_forces_and_moments(state.vel, wind_earth, state.att, total_thrust, tilt_cmd)
             tail_force, tail_moment = self.aero.compute_tail_forces(
                 state.vel,
                 wind_earth,
@@ -145,8 +145,9 @@ class TiltrotorDynamics:
                 delta_left,
                 delta_right,
             )
-            new_state.lift = float(-aero_force[2])
-            new_state.drag = float(-aero_force[0])
+            wing_force_wind = rotation_body_to_wind(alpha, beta) @ aero_force
+            new_state.lift = float(-wing_force_wind[2])
+            new_state.drag = float(-wing_force_wind[0])
             new_state.V_T = float(V_T)
             new_state.alpha = float(alpha)
             force_body += aero_force + tail_force

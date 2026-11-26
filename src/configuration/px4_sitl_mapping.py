@@ -214,6 +214,7 @@ def build_px4_sitl_mapping(
             "tilt": {
                 "maximum_rate_deg_s": tilt.get("maximum_rate_deg_s"),
                 "angle_limits_deg": tilt.get("angle_limits_deg"),
+                "angle_convention": tilt.get("angle_convention"),
                 "feedback_sensor": tilt.get("feedback_sensor"),
                 "servo_arrangement": arrangement,
                 "physical_output_assignment": None,

@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.transition import transition_speed_envelope
+from src.dynamics.nacelle import tilt_deg_from_deflection_deg
 
 
 def wing_lift_thrust_sensitivity(
@@ -103,7 +104,7 @@ def write_sensitivity_csv(result, path):
                     writer.writerow([
                         lift_scale,
                         thrust_scale,
-                        tilt_deg,
+                        tilt_deg_from_deflection_deg(tilt_deg),
                         speed,
                         result["feasible"][
                             lift_index, thrust_index, tilt_index

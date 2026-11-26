@@ -15,8 +15,8 @@ class TransitionReference:
         Args:
             start_altitude: Target altitude to hold (m).
             target_speed: Target forward speed (m/s) at end of transition.
-            transition_time: Time (s) to complete the tilt 0°→90°.
-            tilt_hold_time: Initial time (s) to hold at 0° tilt.
+            transition_time: Seconds to rotate the thrust axis from upward to forward.
+            tilt_hold_time: Seconds to hold the upward rotor orientation.
         """
         if transition_time <= 0.0:
             raise ValueError("transition_time must be positive")

@@ -226,7 +226,56 @@ def test_configured_four_rotor_model_keeps_rear_thrust_at_full_tilt(tmp_path):
     thrust = aircraft.k_thrust * omega**2
     assert force[0] == pytest.approx(2 * thrust)
     assert force[2] == pytest.approx(-2 * thrust)
-    assert moment[1] == pytest.approx(-2.2 * thrust)
+    assert moment[1] == pytest.approx(0.2 * thrust)
+
+
+def test_baseline_four_rotor_hover_balances_weight_and_moments():
+    from src.configuration.aircraft_models import build_aircraft_dynamics
+    from src.dynamics.nacelle import deflection_rad_from_tilt_deg
+    from src.dynamics.state import AircraftState
+
+    aircraft = load_aircraft_parameters()
+    dynamics = build_aircraft_dynamics(aircraft)
+    state = AircraftState(pos=np.array([0.0, 0.0, -100.0]))
+    omega = np.sqrt(aircraft.mass * aircraft.gravity / (4.0 * aircraft.k_thrust))
+    hover = deflection_rad_from_tilt_deg(90.0)
+    updated = dynamics.step(state, np.zeros(3), *([omega] * 4), hover, 0.0, 0.0, 0.01)
+
+    np.testing.assert_allclose(dynamics.last_diagnostics["force_body"], [0, 0, -49.05])
+    np.testing.assert_allclose(updated.vel, 0, atol=1e-12)
+    np.testing.assert_allclose(updated.omega, 0, atol=1e-12)
+
+
+def test_baseline_full_tilt_cruise_balances_forces_and_moments():
+    from src.configuration.aircraft_models import build_aircraft_dynamics
+    from src.dynamics.nacelle import deflection_rad_from_tilt_deg
+    from src.dynamics.state import AircraftState
+
+    aircraft = load_aircraft_parameters()
+    dynamics = build_aircraft_dynamics(aircraft)
+    tilt = deflection_rad_from_tilt_deg(0.0)
+    state = AircraftState(
+        pos=np.array([0.0, 0.0, -100.0]), vel=np.array([30.0, 0.0, 0.0]), tilt=tilt,
+    )
+    # Independently balanced at zero pitch: front thrust equals drag,
+    # rear thrust equals weight minus net lift, and pitch moments sum to zero.
+    front_pair_thrust, rear_pair_thrust = 11.63197801311935, 18.276670142506823
+    front_omega, rear_omega = np.sqrt(
+        np.array([front_pair_thrust, rear_pair_thrust]) / (2.0 * aircraft.k_thrust)
+    )
+    tail_deflection = np.deg2rad(-6.718572724531241)
+    assert max(front_omega, rear_omega) < aircraft.max_omega
+    assert abs(tail_deflection) < aircraft.vtail_max_deflection_rad
+
+    updated = dynamics.step(
+        state, np.zeros(3), front_omega, front_omega, rear_omega, rear_omega,
+        tilt, tail_deflection, tail_deflection, 0.01,
+    )
+
+    np.testing.assert_allclose(dynamics.last_diagnostics["acceleration_ned"], 0, atol=1e-10)
+    np.testing.assert_allclose(dynamics.last_diagnostics["moment_body"], 0, atol=1e-10)
+    np.testing.assert_allclose(updated.vel, state.vel, atol=1e-12)
+    np.testing.assert_allclose(updated.att, state.att, atol=1e-12)
 
 
 def test_upgraded_closed_loop_reads_configuration(tmp_path, monkeypatch):
@@ -284,7 +333,14 @@ def test_geometry_uses_configured_span_motor_positions_and_pivot(tmp_path, monke
     monkeypatch.setattr(geometry, "load_aircraft_parameters", lambda: aircraft)
     cad = geometry.CadGeometry()
     assert cad.offsets["wing_right"]["tip_le"] == [0.25, 2.0, 0.0]
-    np.testing.assert_allclose(cad.calculate_tilted_motors(90)[0]["pos"], [0.0, -0.5, -1.0], atol=1e-12)
+    np.testing.assert_allclose(cad.calculate_tilted_motors(0)[0]["pos"], [0.0, -0.5, 1.0], atol=1e-12)
+    np.testing.assert_allclose(cad.calculate_tilted_motors(90)[0]["thrust_dir"], [0, 0, -1], atol=1e-12)
+    np.testing.assert_allclose(cad.calculate_tilted_motors(0)[0]["thrust_dir"], [1, 0, 0], atol=1e-12)
+    wing = cad.offsets["wing_right"]
+    wing_properties = cad.compute_wing_properties(
+        wing["root_le"], wing["root_te"], wing["tip_le"], wing["tip_te"],
+    )
+    assert wing_properties["ac_x"] == pytest.approx(aircraft.wing_aerodynamic_center_x_m)
 
 
 def test_reduced_corridor_does_not_return_failed_solver_iterate(monkeypatch):

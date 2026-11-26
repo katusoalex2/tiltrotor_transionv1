@@ -3,14 +3,17 @@ import numpy as np
 
 
 def tilted_rotor_position(position, tilt_rad, pivot_xz=(0.1, 0.0)):
-    """Rotate a rotor position about the shared body-frame tilt axis."""
+    """Rotate the hub about the body-frame pivot with its thrust axis.
+
+    In forward-right-down axes, positive nacelle tilt rotates up toward forward.
+    """
     x, y, z = position[:3]
     pivot_x, pivot_z = pivot_xz
     relative_x, relative_z = x - pivot_x, z - pivot_z
     return np.array([
-        pivot_x + relative_x * np.cos(tilt_rad) + relative_z * np.sin(tilt_rad),
+        pivot_x + relative_x * np.cos(tilt_rad) - relative_z * np.sin(tilt_rad),
         y,
-        pivot_z - relative_x * np.sin(tilt_rad) + relative_z * np.cos(tilt_rad),
+        pivot_z + relative_x * np.sin(tilt_rad) + relative_z * np.cos(tilt_rad),
     ])
 
 

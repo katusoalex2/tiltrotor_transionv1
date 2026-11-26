@@ -5,6 +5,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
@@ -128,7 +129,7 @@ def main():
     print(f"Success: {result.success}")
     print(f"Message: {result.message}")
     print(f"Optimal max altitude loss: {result.fun:.2f} m")
-    print(f"Optimal tilt profile (deg): {np.rad2deg(result.x).round(1)}")
+    print(f"Optimal rotor angles (deg): {tilt_deg_from_deflection_rad(result.x).round(1)}")
 
     # --- Simulate with optimal and compare against linear baseline ---
     linear_profile = np.linspace(0.0, np.pi / 2, N_PIECES)

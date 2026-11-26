@@ -218,7 +218,7 @@ primarily combines other objects rather than inheriting from them.
 | Dashboard Monte Carlo | [monte_carlo.py](src/simulation/monte_carlo.py) | Seeded scenarios and optional actuator failures run through a supplied simulation callback. |
 | Standalone comparisons | [monte_carlo_gusts.py](scripts/monte_carlo_gusts.py), [compare_indi_dob.py](scripts/compare_indi_dob.py) | Separate controller-comparison scripts; their configurations and results are not interchangeable with dashboard Monte Carlo. |
 
-The master simulation loads [robust_corridor.csv](configs/robust_corridor.csv);
+The master simulation loads the regenerated [reference schedule](../UAM%20Configurations/robust_corridor_elevation.csv);
 that CSV is not automatically produced or consumed by the dashboard's timed
 mission. Likewise, the reduced optimizer's curves do not automatically become
 the main dashboard simulation's references.
@@ -232,8 +232,8 @@ the main dashboard simulation's references.
 - **Dynamics:** computes forces and moments and integrates the next aircraft
   state; the feedback loop then repeats.
 - **NED / FRD:** position and velocity use north-east-down; body forces and
-  body rates use forward-right-down. Project nacelle convention is 0 degrees
-  in hover and 90 degrees in cruise.
+  body rates use forward-right-down. Project rotor angle is 90 degrees
+  in hover and 0 degrees in cruise. Model rotations use deflection from vertical.
 - **Safety:** model assumptions, control authority, sensor effects, actuator
   dynamics and aircraft-specific parameters remain unvalidated. Neither a
   successful plot nor an optimization establishes flight safety.

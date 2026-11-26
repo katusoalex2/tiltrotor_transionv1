@@ -15,7 +15,8 @@ from src.configuration.px4_sitl_mapping import (
 
 
 PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "configs" / "uam_profile_template.yaml"
+    Path(__file__).resolve().parents[1]
+    / "UAM Configurations" / "illustrative_uam_simulation_profile.json"
 )
 
 
@@ -37,7 +38,7 @@ def test_sitl_mapping_preserves_profile_geometry_without_assigning_hardware_outp
     assert mapping["source_hardware_outputs_enabled"] is False
     assert len(rotors) == 4
     assert [rotor["tilt_enabled"] for rotor in rotors] == [True, True, False, False]
-    assert rotors[0]["position_profile_m"] == [0.3, 0.4, 0.0]
+    assert rotors[0]["position_profile_m"] == [0.3, -0.4, 0.0]
     assert all(rotor["physical_output_assignment"] is None for rotor in rotors)
     assert rotors[0]["rotation_direction"] == "UNVERIFIED"
     assert any("exact PX4 release" in item for item in mapping["unresolved_before_hardware_configuration"])

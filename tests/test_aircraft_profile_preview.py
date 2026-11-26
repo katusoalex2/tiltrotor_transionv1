@@ -11,7 +11,8 @@ from src.control.mission import MissionProfile
 
 
 PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "configs" / "uam_profile_template.yaml"
+    Path(__file__).resolve().parents[1]
+    / "UAM Configurations" / "illustrative_uam_simulation_profile.json"
 )
 
 
@@ -29,7 +30,7 @@ def test_preview_tracks_profile_dimensions_and_any_configured_rotor_count():
     values["wing_tip_y_m"] = 1.8
     values["motor_positions"].append([0.0, 0.0, 0.0, False])
 
-    figure = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=0.0)
+    figure = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=90.0)
 
     traces = {trace.name: trace for trace in figure.data}
     fuselage = traces["Fuselage envelope"]
@@ -41,16 +42,20 @@ def test_preview_tracks_profile_dimensions_and_any_configured_rotor_count():
 
 def test_preview_tilt_moves_enabled_rotors_and_changes_thrust_axis():
     values = load_preview_values()
-    level = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=0.0)
-    tilted = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=60.0)
+    level = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=90.0)
+    tilted = build_aircraft_profile_figure("Test UAM", values, rotor_tilt_deg=30.0)
 
     level_traces = {trace.name: trace for trace in level.data}
     tilted_traces = {trace.name: trace for trace in tilted.data}
 
-    assert not np.isclose(
-        level_traces["Rotor 1 center"].z[0],
+    assert np.isclose(
         tilted_traces["Rotor 1 center"].z[0],
+        level_traces["Rotor 1 center"].z[0] - 0.2 * np.sin(np.deg2rad(60.0)),
     )
+    disk, axis = tilted_traces["Rotor 1 propeller disk"], tilted_traces["Rotor 1 thrust axis"]
+    direction = np.array([axis.x[1] - axis.x[0], 0.0, axis.z[1] - axis.z[0]])
+    radii = np.column_stack((disk.x - axis.x[0], disk.y - axis.y[0], disk.z - axis.z[0]))
+    np.testing.assert_allclose(radii @ direction, 0.0, atol=1e-12)
     assert np.isclose(
         tilted_traces["Rotor 1 thrust axis"].x[1]
         - tilted_traces["Rotor 1 thrust axis"].x[0],
@@ -62,7 +67,7 @@ def test_preview_tilt_moves_enabled_rotors_and_changes_thrust_axis():
     )
 
 
-def test_reference_animation_reaches_ninety_degrees_without_tilting_fixed_rotors():
+def test_reference_animation_reaches_zero_degrees_without_tilting_fixed_rotors():
     figure = build_transition_reference_animation("Test UAM", load_preview_values())
     first, last = figure.frames[0], figure.frames[-1]
     first_traces = {trace.name: trace for trace in first.data}
@@ -71,6 +76,8 @@ def test_reference_animation_reaches_ninety_degrees_without_tilting_fixed_rotors
     assert first.name == "0.00"
     assert last.name == "21.00"
     assert "REFERENCE ONLY" in last.layout.title.text
+    assert "tilt 90.0°" in first.layout.title.text
+    assert "tilt 0.0°" in last.layout.title.text
     front_angles = []
     for frame in figure.frames:
         traces = {trace.name: trace for trace in frame.data}

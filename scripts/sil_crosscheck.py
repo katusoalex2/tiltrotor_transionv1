@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 # --- IMPORTS FROM YOUR EXISTING PROJECT (only the controller and reference) ---
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
-from src.control.trajectory import ReferenceTrajectory
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory
 
 # --- INDEPENDENT DYNAMICS (written from scratch, no src.dynamics imports) ---
 
@@ -43,8 +43,8 @@ class IndependentDynamics:
             rotor_tilt = tilt if tilts else 0.0
             if tilts:
                 rel_x, rel_z = x - pivot_x, z - pivot_z
-                x = pivot_x + rel_x * np.cos(tilt) + rel_z * np.sin(tilt)
-                z = pivot_z - rel_x * np.sin(tilt) + rel_z * np.cos(tilt)
+                x = pivot_x + rel_x * np.cos(tilt) - rel_z * np.sin(tilt)
+                z = pivot_z + rel_x * np.sin(tilt) + rel_z * np.cos(tilt)
             fx = thrust * np.sin(rotor_tilt)
             fz = -thrust * np.cos(rotor_tilt)
             Fx_body += fx
@@ -140,7 +140,7 @@ def main():
     print("Running SIL cross-check...")
     dt = 0.01
     duration = 15.0
-    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
+    ref = ReferenceTrajectory(DEFAULT_CORRIDOR_PATH, speed_max=12.0)
     aircraft = load_aircraft_parameters()
     main_log = run_main_sim(duration, dt, build_collective_controller(aircraft), ref)
     indep_log = run_independent_sim(duration, dt, build_collective_controller(aircraft), ref)

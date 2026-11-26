@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.dynamics.transition import transition_speed_envelope
+from src.dynamics.nacelle import tilt_deg_from_deflection_deg
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 
 
@@ -42,8 +43,7 @@ def build_plot() -> Path:
         gravity=aircraft.gravity,
     )
 
-    project_tilt_deg = envelope["tilt_deg"]
-    displayed_tilt_deg = 90.0 - project_tilt_deg
+    displayed_tilt_deg = tilt_deg_from_deflection_deg(envelope["tilt_deg"])
     if not np.any(envelope["feasible"]):
         raise ValueError("no feasible points in the analytical envelope for the configured aircraft")
     max_speed = float(np.nanmax(envelope["maximum_speed_mps"]))

@@ -1,3 +1,7 @@
+# Historical diagnostic
+
+This archived analysis and its figures use the former angle convention, with 0° upward and 90° forward. The rerun is in [transition study](figures/transition_study/summary.json).
+
 > **RETRACTED:** This report contains incorrect RPM-unit conversions, lift calculations,
 > and unsupported safety claims. Do not use its conclusions or recommendations.
 

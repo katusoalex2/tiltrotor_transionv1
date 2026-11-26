@@ -19,6 +19,29 @@ from src.dynamics.transition import (
 )
 
 
+def test_disturbed_longitudinal_loads_preserve_reversed_airflow_quadrant():
+    from src.configuration.aircraft_models import build_aircraft_dynamics
+    from src.configuration.aircraft_parameters import load_aircraft_parameters
+    from src.dynamics.state import AircraftState
+    from src.dynamics.transition_trajectory import longitudinal_loads
+
+    aircraft = load_aircraft_parameters()
+    dynamics = build_aircraft_dynamics(aircraft, low_speed_full_load_mps=2.5)
+    wind = np.array([2.0, 0.0, 0.0])
+    state = AircraftState(pos=np.array([0.0, 0.0, -100.0]),
+                          vel=np.array([-2.0, 0.0, -1.0]), att=np.array([0, 0.15, 0]))
+    tilt, front, rear, tail = 0.25, 600.0, 500.0, 0.03
+    dynamics.step(state, wind, front, front, rear, rear, tilt, tail, tail, 0.01)
+    numeric = dynamics.last_diagnostics
+    symbolic = longitudinal_loads(aircraft, 2.5, exact_kinematics=True)
+    longitudinal = np.asarray(symbolic([-4.0, 1.0, 0.0, 0.15, 0.0], [tilt, front, rear, tail])).ravel()
+    np.testing.assert_allclose(
+        longitudinal[:3],
+        [numeric["acceleration_ned"][0], -numeric["acceleration_ned"][2], numeric["moment_body"][1]],
+        atol=1e-10,
+    )
+
+
 def make_dynamics():
     return TiltrotorDynamics(
         mass=5.0,
@@ -207,6 +230,8 @@ def test_optimizer_rotor_pitch_moment_matches_configured_rotor_geometry():
         0.0, 0.0, tilt, front_pair_thrust, rear_pair_thrust
     )
 
+    expected_pitch_moment = front_pair_thrust * (0.2 + 0.1 * np.cos(tilt)) - 0.3 * rear_pair_thrust
+    assert float(point["rotor_pitch_moment_n_m"]) == pytest.approx(expected_pitch_moment, abs=1e-8)
     assert float(point["rotor_pitch_moment_n_m"]) == pytest.approx(
         dynamics.last_diagnostics["moment_body"][1], abs=1e-8
     )
@@ -434,8 +459,8 @@ def test_longitudinal_trim_uses_residual_tolerance_even_if_solver_stops_early(mo
     dynamics = build_aircraft_dynamics(load_aircraft_parameters())
     trim = solve_longitudinal_trim(
         dynamics,
-        airspeed_mps=4.0,
-        tilt_rad=np.deg2rad(30.0),
+        airspeed_mps=10.0,
+        tilt_rad=np.deg2rad(45.0),
     )
 
     assert not trim["solver_converged"]
@@ -511,8 +536,8 @@ def test_transition_stability_map_reports_trim_quality_and_local_derivatives():
         result["static_stability_status"][np.isfinite(result["cm_alpha_per_rad"])]
         == "unassessed"
     )
-    assert not result["trim_feasible"][1, 0]
-    assert not result["assessment_mask"][1, 0]
+    np.testing.assert_array_equal(result["trim_feasible"][1], [True, False])
+    np.testing.assert_array_equal(result["assessment_mask"][1], [True, False])
     assert result["trim_motor_rpm"].shape == (2, 2)
     assert result["trim_alpha_deg"].shape == (2, 2)
     assert result["trim_pitch_moment_residual"].shape == (2, 2)

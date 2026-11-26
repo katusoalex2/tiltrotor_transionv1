@@ -29,6 +29,10 @@ from src.allocation.allocator import ControlAllocator
 from src.dynamics.state import AircraftState
 from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
+from src.dynamics.nacelle import (
+    HOVER_TILT_DEG, deflection_rad_from_tilt_deg,
+    tilt_deg_from_deflection_deg, tilt_deg_from_deflection_rad,
+)
 from src.dynamics.transition import (
     control_effectiveness_map,
     constrained_transition_corridor,
@@ -77,8 +81,9 @@ st.set_page_config(page_title="KADA UAM Transition phase configurators _kONKUK",
 # ==========================================================
 # 3. LOAD CONFIG
 # ==========================================================
-cfg_path = os.path.join(base_dir, "configs", "blue_uam.yaml")
-profile_template_path = os.path.join(base_dir, "configs", "uam_profile_template.yaml")
+config_dir = os.path.join(base_dir, "UAM Configurations")
+cfg_path = os.path.join(config_dir, "blue_uam.yaml")
+profile_template_path = os.path.join(config_dir, "illustrative_uam_simulation_profile.json")
 with open(profile_template_path, "rb") as profile_file:
     template_profile_bytes = profile_file.read()
 uploaded_profile = st.sidebar.file_uploader(
@@ -91,7 +96,7 @@ if uploaded_profile is not None:
     profile_filename = uploaded_profile.name
 else:
     profile_bytes = template_profile_bytes
-    profile_filename = "uam_profile_template.yaml"
+    profile_filename = os.path.basename(profile_template_path)
 
 profile_fingerprint = hashlib.sha256(profile_bytes).hexdigest()
 if st.session_state.get("_cached_aircraft_profile_fingerprint") == profile_fingerprint:
@@ -136,7 +141,7 @@ for index, position in enumerate(profile_defaults["motor_positions"]):
 
 # Initialize the CAD Geometry engine
 
-geo_path = os.path.join(base_dir, "configs", "geometry_offsets.yaml")
+geo_path = os.path.join(config_dir, "geometry_offsets.yaml")
 cad = CadGeometry(geo_path)
 
 GUST_DIRECTION_VECTORS = {
@@ -150,6 +155,7 @@ GUST_DIRECTION_VECTORS = {
 }
 
 st.title("KADA UAM Transition phase configurators _kONKUK")
+st.caption("Rotor angle is 90° when thrust points upward and 0° when it points forward.")
 st.markdown("[Jump to additional interactive transition analyses](#additional-interactive-transition-analyses)")
 
 
@@ -375,21 +381,22 @@ with side_tabs[6]:
         "Manual forward speed (m/s)", min_value=0.0, value=5.0, step=0.5, key="manual_speed"
     )
     manual_tilt_deg = st.slider(
-        "Manual nacelle tilt (deg)", 0.0, 90.0, 30.0, 1.0, key="manual_tilt_deg"
+        "Manual rotor angle (deg)", 0.0, 90.0, 60.0, 1.0,
+        key="manual_rotor_elevation_deg", help="90° points upward and 0° points forward.",
     )
 
     default_waypoints = pd.DataFrame([
-        {"north_m": 0.0, "east_m": 0.0, "altitude_m": 20.0, "speed_mps": 0.0, "tilt_deg": 0.0},
+        {"north_m": 0.0, "east_m": 0.0, "altitude_m": 20.0, "speed_mps": 0.0, "tilt_deg": 90.0},
         {"north_m": 30.0, "east_m": 0.0, "altitude_m": 20.0, "speed_mps": 6.0, "tilt_deg": 45.0},
-        {"north_m": 120.0, "east_m": 0.0, "altitude_m": 20.0, "speed_mps": 12.0, "tilt_deg": 90.0},
+        {"north_m": 120.0, "east_m": 0.0, "altitude_m": 20.0, "speed_mps": 12.0, "tilt_deg": 0.0},
     ])
     waypoint_table = st.data_editor(
         default_waypoints,
         num_rows="dynamic",
         hide_index=True,
-        key="mission_waypoints",
+        key="mission_waypoints_elevation",
     )
-    st.caption("Waypoints use local NED position (north/east in metres); altitude is positive up.")
+    st.caption("Waypoints use local north and east coordinates in metres and altitude above the datum. Rotor angle is 90° upward and 0° forward.")
     waypoint_columns = ["north_m", "east_m", "altitude_m", "speed_mps", "tilt_deg"]
     route_values = waypoint_table[waypoint_columns]
     has_incomplete_waypoint = route_values.isna().any(axis=1).any()
@@ -644,12 +651,12 @@ report.text("caption", st,
     " preview "
 )
 profile_preview_tilt_deg = st.slider(
-    "Preview rotor tilt angle (deg)",
+    "Preview rotor angle (deg)",
     min_value=0.0,
     max_value=90.0,
-    value=0.0,
+    value=HOVER_TILT_DEG,
     step=1.0,
-    key="aircraft_profile_preview_tilt_deg",
+    key="aircraft_profile_preview_elevation_deg",
 )
 profile_preview_figure = build_aircraft_profile_figure(
     active_profile["metadata"]["name"],
@@ -665,7 +672,7 @@ report.plotly_chart(st,
 
 if st.checkbox("Show reference-only transition animation", key="show_transition_reference"):
     st.warning(
-        "REFERENCE ONLY: This schematic shows a predefined 0–90° tilt command, "
+        "REFERENCE ONLY: This schematic shows a predefined 90°-to-0° rotor-angle command, "
         "not simulated aircraft motion or evidence of a safe transition. It does "
         "not apply actuator-rate, aerodynamic, or other physical limits. "
         "Simulation results and warnings below remain unchanged."
@@ -680,7 +687,7 @@ if st.checkbox("Show reference-only transition animation", key="show_transition_
             active_profile["metadata"]["name"], dashboard_profile_values
         ),
         width="stretch",
-        alt="Reference-only schematic animation of a 0 to 90 degree rotor tilt command, not simulated flight",
+        alt="Reference animation from 90 degrees upward to 0 degrees forward",
         key="transition_reference_animation",
     )
 
@@ -785,7 +792,7 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
             east_m=row[1],
             altitude_m=row[2],
             speed_mps=row[3],
-            tilt_rad=np.deg2rad(row[4]),
+            tilt_rad=deflection_rad_from_tilt_deg(row[4]),
             name=f"WP {index + 1}",
         )
         for index, row in enumerate(waypoint_rows)
@@ -869,7 +876,7 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
             r = {
                 "altitude": manual_altitude,
                 "speed": manual_speed,
-                "tilt": np.deg2rad(manual_tilt_deg),
+                "tilt": deflection_rad_from_tilt_deg(manual_tilt_deg),
                 "phase": "MANUAL",
             }
         elif flight_plan == "Waypoint route":
@@ -984,9 +991,9 @@ def run_simulation(mass, mass_fuselage, mass_wing, mass_vtail, mass_motor, batte
         log["wind_north"].append(wind_vec[0])
         log["wind_east"].append(wind_vec[1])
         log["wind_down"].append(wind_vec[2])
-        log["tilt"].append(np.rad2deg(state.tilt))
-        log["tilt_cmd"].append(np.rad2deg(r["tilt"]))
-        log["tilt_controller_cmd"].append(np.rad2deg(cmd["tilt"]))
+        log["tilt"].append(tilt_deg_from_deflection_rad(state.tilt))
+        log["tilt_cmd"].append(tilt_deg_from_deflection_rad(r["tilt"]))
+        log["tilt_controller_cmd"].append(tilt_deg_from_deflection_rad(cmd["tilt"]))
         log["tilt_limited"].append(cmd["tilt_limited"])
         log["roll"].append(np.rad2deg(state.att[0]))
         log["yaw"].append(np.rad2deg(state.att[2]))
@@ -1357,7 +1364,7 @@ report.pyplot(st,
 report.text(
     "caption", st,
     "Wing L/D is unassessed when airspeed or drag is too small; it is not forced "
-    "to zero in hover or to a maximum at 90° tilt.",
+    "to zero in hover or to a maximum at 0° rotor angle.",
 )
 if show_transition_window:
     if transition_times.size:
@@ -1957,8 +1964,8 @@ if current_V_T < 0.5:
     current_V_T = 0.5
 
 from src.aero.handoff import control_authority, control_blend
-auth = control_authority(np.deg2rad(current_tilt), current_V_T, 12.0)
-blend = control_blend(np.deg2rad(current_tilt))
+auth = control_authority(deflection_rad_from_tilt_deg(current_tilt), current_V_T, 12.0)
+blend = control_blend(deflection_rad_from_tilt_deg(current_tilt))
 
 c1, c2, c3 = st.columns(3)
 report.metric(c1, "Rotor Pitch Authority", f"{auth['rotor_authority_frac']*100:.0f}%")
@@ -1974,7 +1981,7 @@ vtail_fracs = []
 blends = []
 
 for t_deg in tilt_scan:
-    t_rad = np.deg2rad(t_deg)
+    t_rad = deflection_rad_from_tilt_deg(t_deg)
     auth_scan = control_authority(t_rad, 12.0, 12.0)
     rotor_fracs.append(auth_scan['rotor_authority_frac'] * 100)
     vtail_fracs.append(auth_scan['vtail_authority_frac'] * 100)
@@ -2027,7 +2034,7 @@ report.text("markdown", st, "---")
 report.text("subheader", st, "3x3 Inertia Tensor & Mass Properties")
 report.text("markdown", st, "This matrix describes the aircraft's resistance to rotation. Cross-coupling terms ($I_{xz}$) appear when the mass is asymmetric.")
 
-# Calculate the current Inertia Matrix at hover (0 deg tilt)
+# Calculate the current inertia matrix at hover (zero model deflection).
 current_I = props.calculate_inertia(0.0)
 
 # Convert to a displayable format
@@ -2050,7 +2057,7 @@ iyy_scan = []
 izz_scan = []
 
 for t_deg in tilt_scan:
-    I_dyn = props.calculate_inertia(t_deg)
+    I_dyn = props.calculate_inertia(tilt_deg_from_deflection_deg(t_deg))
     ixx_scan.append(I_dyn[0,0])
     iyy_scan.append(I_dyn[1,1])
     izz_scan.append(I_dyn[2,2])
@@ -2106,9 +2113,9 @@ analysis_tilt_deg = analysis_tilt_col.slider(
     max_value=90,
     value=45,
     step=1,
-    key="transition_analysis_tilt",
+    key="transition_analysis_elevation",
 )
-analysis_tilt_rad = np.deg2rad(analysis_tilt_deg)
+analysis_tilt_rad = deflection_rad_from_tilt_deg(analysis_tilt_deg)
 tail_limit_rad = 0.2
 trim = solve_longitudinal_trim(
     analysis_dynamics,
@@ -2238,7 +2245,7 @@ with corridor_tab:
 
     if current_corridor_result is None:
         report.text("info", st,
-            "."
+            "Select Compute constrained corridor to check trim and actuator margins for the current inputs."
         )
     elif not np.any(current_corridor_result["known_constraints_mask"]):
         report.text("warning", st,
@@ -2250,7 +2257,7 @@ with corridor_tab:
     feasible = envelope["feasible"]
     fig_corridor = go.Figure()
     if np.any(feasible):
-        corridor_tilt = envelope["tilt_deg"][feasible]
+        corridor_tilt = tilt_deg_from_deflection_deg(envelope["tilt_deg"][feasible])
         minimum_speed = envelope["minimum_speed_mps"][feasible]
         maximum_speed = envelope["maximum_speed_mps"][feasible]
         fig_corridor.add_trace(go.Scatter(
@@ -2298,10 +2305,10 @@ with corridor_tab:
             current_corridor_result["airspeeds_mps"],
             dtype=float,
         )
-        corridor_tilts = np.asarray(
+        corridor_tilts = tilt_deg_from_deflection_deg(np.asarray(
             current_corridor_result["tilt_angles_deg"],
             dtype=float,
-        )
+        ))
         trim_only_mask = (
             np.asarray(current_corridor_result["analytic_mask"], dtype=bool)
             & np.asarray(current_corridor_result["trim_mask"], dtype=bool)
@@ -2778,7 +2785,7 @@ with stability_tab:
         )
         derivative_columns = st.columns(3)
         airspeeds = np.asarray(stability_result["airspeeds_mps"], dtype=float)
-        tilts_deg = np.asarray(stability_result["tilt_angles_deg"], dtype=float)
+        tilts_deg = tilt_deg_from_deflection_deg(np.asarray(stability_result["tilt_angles_deg"], dtype=float))
         trim_residuals = np.asarray(stability_result["trim_residual"], dtype=float)
         trim_hover = trim_feasible.astype(float)
         derivative_customdata = np.stack((trim_hover, trim_residuals), axis=-1)
@@ -3335,7 +3342,7 @@ with envelope_tab:
     envelope_figure = go.Figure()
     feasible = envelope["feasible"]
     if np.any(feasible):
-        corridor_tilt = envelope["tilt_deg"][feasible]
+        corridor_tilt = tilt_deg_from_deflection_deg(envelope["tilt_deg"][feasible])
         minimum_speed = envelope["minimum_speed_mps"][feasible]
         maximum_speed = envelope["maximum_speed_mps"][feasible]
         envelope_figure.add_trace(go.Scatter(
@@ -3380,8 +3387,8 @@ with envelope_tab:
 
     protection_frame = pd.DataFrame({
         "time_s": data["t"],
-        "Requested tilt (deg)": data["requested_tilt"] * 180.0 / np.pi,
-        "Protected tilt target (deg)": data["protected_tilt"] * 180.0 / np.pi,
+        "Requested tilt (deg)": tilt_deg_from_deflection_rad(data["requested_tilt"]),
+        "Protected tilt target (deg)": tilt_deg_from_deflection_rad(data["protected_tilt"]),
         "Actual tilt (deg)": data["tilt"],
         "Available control authority (%)": 100.0 * data["available_control_authority"],
     })
@@ -3661,7 +3668,7 @@ bz = R @ np.array([0, 0, 1.5])
 fig_3d.add_trace(go.Scatter3d(x=[0, bz[0]], y=[0, bz[1]], z=[0, bz[2]], mode='lines', line=dict(color='cyan', width=6), name='Body Z'))
 
 # --- 3. The CAD STL Model (Auto-Centered & Scaled) ---
-stl_path = os.path.join(base_dir, "configs", "uam_model.stl")
+stl_path = os.path.join(config_dir, "uam_model.stl")
 
 if os.path.exists(stl_path):
     try:
@@ -3757,7 +3764,10 @@ with c3:
 with c4:
     cs_span = st.slider("Control Surface Span (% of Wingspan)", 0.1, 1.0, 0.80, 0.05)
 
-tilt_deg = st.slider("Rotor Tilt Angle (deg)", 0.0, 90.0, 0.0, 1.0)
+tilt_deg = st.slider(
+    "Rotor angle (deg)", 0.0, 90.0, HOVER_TILT_DEG, 1.0,
+    help="90° points upward and 0° points forward.",
+)
 
 # --- GENERATE MESHES ---
 

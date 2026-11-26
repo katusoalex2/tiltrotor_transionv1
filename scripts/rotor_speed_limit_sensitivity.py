@@ -53,7 +53,7 @@ def run_sensitivity_sweep(speed_limit_fractions=DEFAULT_SPEED_LIMIT_FRACTIONS):
                 "status": "infeasible_hover_thrust",
                 "feasible": False,
                 "failure_reason": (
-                    f"maximum zero-tilt rotor support "
+                    f"maximum hover rotor support "
                     f"{maximum_hover_support:.2f} N is below aircraft weight "
                     f"{aircraft.mass * aircraft.gravity:.2f} N"
                 ),

@@ -8,9 +8,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.dynamics.state import AircraftState
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
-from src.control.trajectory import ReferenceTrajectory, LinearReference
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory, LinearReference
 
 
 def run_sim(reference, duration, dt=0.01):
@@ -43,8 +44,8 @@ def run_sim(reference, duration, dt=0.01):
         log["ref_alt"].append(r["altitude"])
         log["speed"].append(actual_speed)
         log["ref_speed"].append(r["speed"])
-        log["tilt"].append(np.rad2deg(r["tilt"]))
-        log["ref_tilt"].append(np.rad2deg(r["tilt"]))
+        log["tilt"].append(tilt_deg_from_deflection_rad(r["tilt"]))
+        log["ref_tilt"].append(tilt_deg_from_deflection_rad(r["tilt"]))
         log["pitch"].append(np.rad2deg(state.att[1]))
         log["desired_pitch"].append(np.rad2deg(cmd["desired_pitch"]))
         log["alt_err"].append(actual_alt - r["altitude"])
@@ -68,7 +69,7 @@ def compute_metrics(log):
 
 def main():
     # Load both references
-    corridor_path = os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv")
+    corridor_path = DEFAULT_CORRIDOR_PATH
     if not os.path.exists(corridor_path):
         print(f"ERROR: {corridor_path} not found. Run scripts/robust_corridor.py first.")
         return

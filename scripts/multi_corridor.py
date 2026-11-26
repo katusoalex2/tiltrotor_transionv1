@@ -9,6 +9,7 @@ import casadi as ca
 import matplotlib.pyplot as plt
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.reduced_transition import altitude_acceleration
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 
 
 N = 50
@@ -83,13 +84,14 @@ def solve_corridor(objective_type: str):
     opti.set_initial(max_loss, 5.0)
 
     sol = opti.solve()
+    altitude = np.asarray(sol.value(alt))
 
     return {
         "tilt": np.array(sol.value(tilt)),
         "tilt_dot": np.array(sol.value(tilt_dot)),
-        "alt": np.array(sol.value(alt)),
+        "alt": altitude,
         "vz": np.array(sol.value(vz)),
-        "max_loss": float(sol.value(max_loss)),
+        "max_loss": ALT_START - float(np.min(altitude)),
         "total_effort": float(np.sum(np.array(sol.value(tilt_dot)) ** 2)),
     }
 
@@ -117,7 +119,7 @@ def main():
 
     # Plot 1: Tilt profiles
     for label, r in results.items():
-        axes[0].plot(t_arr, np.rad2deg(r["tilt"]), color=colors[label], linewidth=2, label=label)
+        axes[0].plot(t_arr, tilt_deg_from_deflection_rad(r["tilt"]), color=colors[label], linewidth=2, label=label)
     axes[0].set_xlabel("Time (s)")
     axes[0].set_ylabel("Tilt angle (deg)")
     axes[0].set_title("Tilt Profiles")
@@ -135,7 +137,7 @@ def main():
 
     # Plot 3: Tilt rates
     for label, r in results.items():
-        axes[2].plot(t_arr[:-1], np.rad2deg(r["tilt_dot"]), color=colors[label], linewidth=2, label=label)
+        axes[2].plot(t_arr[:-1], -np.rad2deg(r["tilt_dot"]), color=colors[label], linewidth=2, label=label)
     axes[2].set_xlabel("Time (s)")
     axes[2].set_ylabel("Tilt rate (deg/s)")
     axes[2].set_title("Actuator Effort (Tilt Rate)")
@@ -156,4 +158,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

@@ -6,7 +6,7 @@ import numpy as np
 
 class MissionProfile:
     def __init__(self):
-        # We tilt from 0 to 90 degrees over 20 seconds
+        # The model deflection increases as the rotor angle falls from 90° to 0°.
         self.hover_time = 1.0
         self.transition_duration = 20.0
         self.total_time = self.hover_time + self.transition_duration

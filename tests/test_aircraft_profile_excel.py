@@ -16,7 +16,8 @@ from src.configuration.aircraft_profile_excel import (
 
 
 PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "configs" / "uam_profile_template.yaml"
+    Path(__file__).resolve().parents[1]
+    / "UAM Configurations" / "illustrative_uam_simulation_profile.json"
 )
 
 

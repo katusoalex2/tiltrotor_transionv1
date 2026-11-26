@@ -72,12 +72,12 @@ def test_allocator_and_plant_use_the_same_configured_tilt_pivot():
     )
     matrix = allocator.allocation_matrix(np.pi / 2)
 
-    np.testing.assert_allclose(matrix[1:, 0], [0.0, 0.0, 0.4], atol=1e-12)
+    np.testing.assert_allclose(matrix[1:, 0], [0.0, 0.4, 0.4], atol=1e-12)
     np.testing.assert_allclose(moment, matrix[1:, 0], atol=1e-12)
 
 
 def test_motor_inertia_uses_configured_tilt_pivot():
-    props = MassProperties("configs/aircraft.yaml")
+    props = MassProperties()
     props.mass_fuselage = props.mass_wing = props.mass_vtail = 0.0
     props.mass_motor = 1.0
     props.motor_positions = [(0.5, 0.0, 0.4, True)]
@@ -86,7 +86,7 @@ def test_motor_inertia_uses_configured_tilt_pivot():
 
     np.testing.assert_allclose(
         props.calculate_inertia(90.0),
-        np.diag([0.0, 0.25, 0.25]),
+        [[0.16, 0.0, -0.04], [0.0, 0.17, 0.0], [-0.04, 0.0, 0.01]],
         atol=1e-12,
     )
 

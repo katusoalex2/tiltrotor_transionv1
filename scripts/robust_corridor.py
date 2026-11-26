@@ -8,7 +8,9 @@ import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
 from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH
 from src.dynamics.reduced_transition import altitude_acceleration
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 
 
 N = 50
@@ -115,8 +117,8 @@ def main():
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    axes[0].plot(t_arr, np.rad2deg(nominal["tilt"]), 'b-', linewidth=2, label="Nominal")
-    axes[0].plot(t_arr, np.rad2deg(robust["tilt"]), 'r--', linewidth=2, label="Robust")
+    axes[0].plot(t_arr, tilt_deg_from_deflection_rad(nominal["tilt"]), 'b-', linewidth=2, label="Nominal")
+    axes[0].plot(t_arr, tilt_deg_from_deflection_rad(robust["tilt"]), 'r--', linewidth=2, label="Robust")
     axes[0].set_xlabel("Time (s)")
     axes[0].set_ylabel("Tilt angle (deg)")
     axes[0].set_title("Tilt Profiles: Nominal vs Robust")
@@ -133,11 +135,11 @@ def main():
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
-    axes[2].plot(t_arr[:-1], np.rad2deg(nominal["tilt_dot"]), 'b-', linewidth=2, label="Nominal")
-    axes[2].plot(t_arr[:-1], np.rad2deg(robust["tilt_dot"]), 'r--', linewidth=2, label="Robust")
+    axes[2].plot(t_arr[:-1], -np.rad2deg(nominal["tilt_dot"]), 'b-', linewidth=2, label="Nominal")
+    axes[2].plot(t_arr[:-1], -np.rad2deg(robust["tilt_dot"]), 'r--', linewidth=2, label="Robust")
     configured_rate = np.rad2deg(load_aircraft_parameters().max_tilt_rate)
-    axes[2].axhline(configured_rate, color='k', linestyle=':', label="Configured limit")
-    axes[2].axhline(0.85 * configured_rate, color='red', linestyle=':', label="85% cap")
+    axes[2].axhline(-configured_rate, color='k', linestyle=':', label="Configured forward rate limit")
+    axes[2].axhline(-0.85 * configured_rate, color='red', linestyle=':', label="85% forward rate cap")
     axes[2].set_xlabel("Time (s)")
     axes[2].set_ylabel("Tilt rate (deg/s)")
     axes[2].set_title("Tilt Rate: Nominal vs Robust")
@@ -149,12 +151,12 @@ def main():
     plt.show()
 
     # --- Save the robust corridor as the final specification ---
-    corridor_path = os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv")
+    corridor_path = DEFAULT_CORRIDOR_PATH
     np.savetxt(
         corridor_path,
-        np.column_stack([t_arr, np.rad2deg(robust["tilt"]), robust["alt"]]),
+        np.column_stack([t_arr, tilt_deg_from_deflection_rad(robust["tilt"]), robust["alt"]]),
         delimiter=",",
-        header="time_s,tilt_deg,altitude_m",
+        header="time_s,nacelle_angle_deg,altitude_m",
         comments="",
     )
     print(f"\nSaved robust corridor to {corridor_path}")

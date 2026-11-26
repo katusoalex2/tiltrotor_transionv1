@@ -13,7 +13,8 @@ from src.configuration.aircraft_profile import (
 
 
 PROFILE_TEMPLATE = (
-    Path(__file__).resolve().parents[1] / "configs" / "uam_profile_template.yaml"
+    Path(__file__).resolve().parents[1]
+    / "UAM Configurations" / "illustrative_uam_simulation_profile.json"
 )
 
 
@@ -29,7 +30,7 @@ def test_template_loads_with_simulator_defaults_and_supported_geometry():
     assert defaults["fuselage_mass_kg"] == 3.0
     assert defaults["fuselage_length_m"] == 1.6
     assert defaults["motor_tilt_pivot_x_m"] == 0.1
-    assert defaults["motor_positions"][0] == [0.3, 0.4, 0.0, True]
+    assert defaults["motor_positions"][0] == [0.3, -0.4, 0.0, True]
     assert simulation_compatibility_issues(profile) == ()
 
 

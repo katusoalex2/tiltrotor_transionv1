@@ -9,6 +9,7 @@ import casadi as ca
 import matplotlib.pyplot as plt
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.reduced_transition import altitude_acceleration
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 
 
 # --- Problem parameters ---
@@ -96,12 +97,12 @@ def main():
     print(f"Max tilt rate used: {np.rad2deg(np.max(np.abs(tilt_dot_opt))):.2f} deg/s")
     print(f"Min altitude: {alt_opt.min():.2f} m")
     print(f"Final altitude: {alt_opt[-1]:.2f} m")
-    print(f"Final tilt: {np.rad2deg(tilt_opt[-1]):.1f} deg")
+    print(f"Final tilt: {tilt_deg_from_deflection_rad(tilt_opt[-1]):.1f} deg")
     
     print("\nOptimal tilt schedule (sampled):")
     sample_idx = np.linspace(0, N, 8).astype(int)
     for i in sample_idx:
-        print(f"  t={i * DT:5.2f}s  tilt={np.rad2deg(tilt_opt[i]):6.2f} deg")
+        print(f"  t={i * DT:5.2f}s  tilt={tilt_deg_from_deflection_rad(tilt_opt[i]):6.2f} deg")
 
     # --- Plot ---
     t_arr = np.linspace(0, T_TOTAL, N + 1)
@@ -115,8 +116,8 @@ def main():
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
-    axes[1].plot(t_arr, np.rad2deg(tilt_opt), 'g-', linewidth=2, label='Tilt')
-    axes[1].plot(t_arr[:-1], np.rad2deg(tilt_dot_opt), 'r--', label='Tilt rate')
+    axes[1].plot(t_arr, tilt_deg_from_deflection_rad(tilt_opt), 'g-', linewidth=2, label='Tilt')
+    axes[1].plot(t_arr[:-1], -np.rad2deg(tilt_dot_opt), 'r--', label='Tilt rate')
     axes[1].set_xlabel("Time (s)")
     axes[1].set_ylabel("Angle (deg or deg/s)")
     axes[1].set_title("Optimized Tilt Profile")

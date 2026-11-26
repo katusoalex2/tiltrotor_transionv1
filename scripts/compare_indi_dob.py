@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from src.dynamics.state import AircraftState
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, step_collective
-from src.control.trajectory import ReferenceTrajectory
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory
 from src.control.pid import PIDController
 from src.wind.gust import DrydenGust
 
@@ -53,7 +53,7 @@ def run_one(gust_sigma, seed, mode, dt=0.01, duration=20.0):
         raise ValueError("this simulation requires exactly four rotors")
     dyn = build_aircraft_dynamics(aircraft)
     controller = HybridCascade(aircraft.mass, 4 * aircraft.k_thrust, aircraft.max_omega, aircraft.gravity, mode)
-    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), '..', 'UAM Configurations', 'robust_corridor.csv'), speed_max=12.0)
+    ref = ReferenceTrajectory(DEFAULT_CORRIDOR_PATH, speed_max=12.0)
     wind = DrydenGust(sigma=(gust_sigma, gust_sigma, gust_sigma * 0.6), airspeed=12.0, seed=seed)
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, -100.0])

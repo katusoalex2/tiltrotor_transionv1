@@ -1,3 +1,7 @@
+# Historical vertical-thrust analysis
+
+This archived analysis uses deflection from vertical for its angles and equations. The project now reports 90° upward and 0° forward. The rerun is in [transition study](figures/transition_study/summary.json).
+
 > **RETRACTED:** This analysis contains incorrect RPM-unit conversions, lift calculations,
 > and unsupported safety claims. Do not use its conclusions or recommendations.
 

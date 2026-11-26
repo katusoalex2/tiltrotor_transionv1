@@ -5,7 +5,9 @@
 # not calculate independent rear compensation or establish a trimmed corridor.
 # KV * cells * cell_voltage_v is an approximate no-load RPM, not measured thrust
 # or a verified loaded motor limit. The speed factor is an explicit assumption.
-# Coordinates: body x forward, y right, z down; metres from the CG.
+# Coordinates are in metres from the assumed CG: x forward, y right, z down.
+# Motor positions are hub centers in hover. The project reports 90 degrees
+# when thrust points up (-z) and 0 degrees when the front pair points forward (+x).
 mass: 5.0                       # kg, configured but unverified all-up mass
 inertia_xx: 0.1                 # kg m^2
 inertia_yy: 0.1

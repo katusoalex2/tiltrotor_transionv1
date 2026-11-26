@@ -63,7 +63,7 @@
           "id": "front_left",
           "position_m": [
             0.3,
-            0.4,
+            -0.4,
             0.0
           ],
           "tilt_enabled": true
@@ -72,7 +72,7 @@
           "id": "front_right",
           "position_m": [
             0.3,
-            -0.4,
+            0.4,
             0.0
           ],
           "tilt_enabled": true
@@ -81,7 +81,7 @@
           "id": "rear_left",
           "position_m": [
             -0.3,
-            0.4,
+            -0.4,
             0.0
           ],
           "tilt_enabled": false
@@ -90,7 +90,7 @@
           "id": "rear_right",
           "position_m": [
             -0.3,
-            -0.4,
+            0.4,
             0.0
           ],
           "tilt_enabled": false
@@ -147,6 +147,7 @@
     "actuators": {
       "tilt": {
         "maximum_rate_deg_s": 30.0,
+        "angle_convention": "90 deg upward (hover), 0 deg forward (cruise)",
         "angle_limits_deg": [
           0.0,
           90.0

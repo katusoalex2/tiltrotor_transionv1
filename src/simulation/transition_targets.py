@@ -41,7 +41,7 @@ def assess_transition_targets(
 
     final_tilt = float(arrays["tilt"][transition][-1])
     complete_time = bool(times[-1] >= transition_end_s)
-    complete = complete_time and final_tilt >= 89.9
+    complete = complete_time and abs(final_tilt) <= 0.1
     rows = [{
         "Target": "Transition completion",
         "Result": "Met" if complete else "Not met",

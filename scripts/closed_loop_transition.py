@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.dynamics.state import AircraftState
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
 from src.control.reference import TransitionReference
@@ -41,7 +42,7 @@ def run_transition(transition_time: float = 10.0, duration: float = 15.0, dt: fl
         log["speed"].append(state.vel[0])
         log["pitch"].append(np.rad2deg(state.att[1]))
         log["desired_pitch"].append(np.rad2deg(cmd["desired_pitch"]))
-        log["tilt"].append(np.rad2deg(cmd["tilt"]))
+        log["tilt"].append(tilt_deg_from_deflection_rad(cmd["tilt"]))
         log["omega"].append(cmd["omega"])
         log["vtail"].append(cmd["delta_left"])
         log["lift"].append(state.lift)

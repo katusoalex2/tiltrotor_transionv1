@@ -7,6 +7,10 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src.control.reference import TransitionReference
+from src.dynamics.nacelle import (
+    CRUISE_TILT_DEG, HOVER_TILT_DEG, TILT_CONVENTION,
+    deflection_rad_from_tilt_deg, tilt_deg_from_deflection_deg, tilt_deg_from_deflection_rad,
+)
 from src.dynamics.tiltrotor import GRAVITY
 from src.dynamics.transition import transition_speed_envelope
 
@@ -31,8 +35,8 @@ def _schedule_analysis(max_tilt_rate_deg_s):
     hold = st.slider("Initial tilt hold (s)", 0.0, 20.0, 2.0, 0.5, key="extra_tilt_hold")
     time = np.linspace(0.0, hold + duration + 2.0, 501)
     reference = TransitionReference(100.0, 20.0, duration, tilt_hold_time=hold)
-    cosine = np.rad2deg([reference.at(float(t))["tilt"] for t in time])
-    linear = 90.0 * np.clip((time - hold) / duration, 0.0, 1.0)
+    cosine = tilt_deg_from_deflection_rad([reference.at(float(t))["tilt"] for t in time])
+    linear = tilt_deg_from_deflection_deg(90.0 * np.clip((time - hold) / duration, 0.0, 1.0))
     _line_chart(time, {"Cosine": cosine, "Linear": linear}, "Project tilt (deg)",
                 "Cosine and linear tilt references versus time")
     _line_chart(time, {
@@ -41,10 +45,6 @@ def _schedule_analysis(max_tilt_rate_deg_s):
         "Positive rate limit": np.full_like(time, max_tilt_rate_deg_s),
         "Negative rate limit": np.full_like(time, -max_tilt_rate_deg_s),
     }, "Tilt rate (deg/s)", "Tilt reference rates and configured rate limits")
-    _line_chart(time, {
-        "Project convention: 0 hover": cosine,
-        "Reverse convention: 90 hover": 90.0 - cosine,
-    }, "Tilt angle (deg)", "Cosine reference in project and reverse angle conventions")
     peak_rate = 45.0 * np.pi / duration
     st.caption(f"Cosine peak reference rate: {peak_rate:.1f} deg/s; configured actuator limit: {max_tilt_rate_deg_s:.1f} deg/s.")
     if peak_rate > max_tilt_rate_deg_s:
@@ -74,7 +74,7 @@ def _force_analysis(dynamics):
     values = {key: np.zeros((len(speeds), len(tilts))) for key in keys}
     for speed_index, speed in enumerate(speeds):
         for tilt_index, tilt_deg in enumerate(tilts):
-            tilt = np.deg2rad(tilt_deg)
+            tilt = deflection_rad_from_tilt_deg(tilt_deg)
             rotor_force, rotor_moment, _ = dynamics._rotor_forces_and_moments(
                 np.full(count, omega), tilt, 100.0
             )
@@ -101,7 +101,7 @@ def _force_analysis(dynamics):
                 x=tilts, y=values[key][speed_index], name=f"{speed:g} m/s",
                 legendgroup=str(speed_index), showlegend=(row == 1 and col == 1),
             ), row=row, col=col)
-    fig.update_xaxes(title_text="Tilt (deg; 0 hover, 90 cruise)")
+    fig.update_xaxes(title_text=f"Rotor angle ({TILT_CONVENTION})")
     fig.update_yaxes(title_text="Force (N)")
     fig.update_layout(height=650, legend_title_text="Airspeed")
     st.plotly_chart(fig, width="stretch", alt="Fixed-rotor-speed forces versus tilt for different airspeeds")
@@ -114,7 +114,7 @@ def _force_analysis(dynamics):
             x=tilts, y=speeds, z=values[key], colorbar={"title": label},
         ))
         figure.update_layout(
-            title=label, xaxis_title="Tilt (deg; 0 hover, 90 cruise)",
+            title=label, xaxis_title=f"Rotor angle ({TILT_CONVENTION})",
             yaxis_title="Airspeed (m/s)", height=350,
         )
         st.plotly_chart(figure, width="stretch", alt=f"{label} across nacelle tilt and airspeed")
@@ -125,10 +125,6 @@ def _envelope_analysis(dynamics):
         "Exploratory analytical envelope only: vertical and forward maximum thrust are "
         "screened separately and may not be simultaneously achievable. No moment trim, "
         "actuator-rate, electrical or gust constraints are established."
-    )
-    convention = st.selectbox(
-        "Tilt angle convention", ["0° hover, 90° cruise", "90° hover, 0° cruise"],
-        key="extra_tilt_convention",
     )
     speed_limit = st.slider("Displayed speed range (m/s)", 5.0, 200.0, 30.0, 5.0, key="extra_envelope_speed")
     aero = dynamics.aero
@@ -144,9 +140,7 @@ def _envelope_analysis(dynamics):
         aspect_ratio=aero.AR,
         samples=181,
     )
-    angle = envelope["tilt_deg"]
-    if convention == "90° hover, 0° cruise":
-        angle = 90.0 - angle
+    angle = tilt_deg_from_deflection_deg(envelope["tilt_deg"])
     if not np.any(envelope["feasible"]):
         st.warning("No analytical envelope points were found for the current inputs.")
         return
@@ -167,14 +161,13 @@ def _envelope_analysis(dynamics):
         x=envelope["maximum_speed_mps"], y=angle, name="Maximum speed",
         mode="lines",
     ))
-    reference_angle = [0.0, 90.0] if convention == "0° hover, 90° cruise" else [90.0, 0.0]
     figure.add_trace(go.Scatter(
-        x=[0.0, 20.0], y=reference_angle, name="Illustrative tilt-scaled reference",
+        x=[0.0, 20.0], y=[HOVER_TILT_DEG, CRUISE_TILT_DEG], name="Illustrative tilt-scaled reference",
         mode="lines", line={"color": "black", "dash": "dot"},
     ))
     figure.update_layout(
         title="Analytical tilt versus speed envelope",
-        xaxis_title="Airspeed (m/s)", yaxis_title=f"Tilt angle (deg; {convention})",
+        xaxis_title="Airspeed (m/s)", yaxis_title=f"Rotor angle ({TILT_CONVENTION})",
         xaxis_range=[0, speed_limit], yaxis_range=[0, 90], height=500,
     )
     st.plotly_chart(figure, width="stretch", alt="Exploratory analytical tilt and speed envelope")
@@ -208,11 +201,11 @@ def _optimizer_analysis():
     time = result["time_s"]
     duration = float(time[-1])
     _line_chart(time, {
-        "Optimized": np.rad2deg(result["tilt_rad"]),
-        "Linear": 90.0 * time / duration,
-        "Cosine": 45.0 * (1.0 - np.cos(np.pi * time / duration)),
+        "Optimized": tilt_deg_from_deflection_rad(result["tilt_rad"]),
+        "Linear": tilt_deg_from_deflection_deg(90.0 * time / duration),
+        "Cosine": tilt_deg_from_deflection_deg(45.0 * (1.0 - np.cos(np.pi * time / duration))),
     }, "Tilt (deg)", "Optimized, linear and cosine tilt schedules")
-    _line_chart(time, {"Tilt rate": np.rad2deg(result["tilt_rate_rad_s"]),
+    _line_chart(time, {"Tilt rate": -np.rad2deg(result["tilt_rate_rad_s"]),
                        "Positive limit": np.full_like(time, np.rad2deg(0.35)),
                        "Negative limit": np.full_like(time, -np.rad2deg(0.35))},
                 "Tilt rate (deg/s)", "Optimized tilt rate and model limits")

@@ -1,3 +1,7 @@
+# Historical notes
+
+The analysis cited below uses the former angle convention, with 0° upward and 90° forward. The rerun is in [transition study](figures/transition_study/summary.json).
+
 > **RETRACTED:** This checklist relies on incorrect RPM-unit conversions, lift calculations,
 > and unsupported safety claims. Do not follow its recommendations.
 

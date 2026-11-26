@@ -1,3 +1,7 @@
+# Historical analysis
+
+The archived results below use the former angle convention, with 0° upward and 90° forward. The rerun is in [transition study](figures/transition_study/summary.json).
+
 > **RETRACTED:** The linked analysis and plot contain incorrect calculations and unsupported
 > safety claims. Do not use their conclusions or recommendations.
 

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AircraftState:
+    """Rigid-body state. Internal tilt is deflection from vertical in radians."""
+
     pos: np.ndarray = field(default_factory=lambda: np.zeros(3))
     vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
     att: np.ndarray = field(default_factory=lambda: np.zeros(3))

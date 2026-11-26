@@ -45,7 +45,7 @@ def main():
     ax.plot([f["nose_tip"][0], f["tail_tip"][0]], [f["nose_tip"][1], f["tail_tip"][1]], [f["nose_tip"][2], f["tail_tip"][2]], 'gray', linewidth=6, alpha=0.5)
 
     # 4. Plot Motors
-    for m in cad.calculate_tilted_motors(0.0):
+    for m in cad.calculate_tilted_motors(90.0):
         color = 'blue' if m["tilts"] else 'red'
         ax.scatter(m["pos"][0], m["pos"][1], m["pos"][2], c=color, s=100, marker='^')
         ax.text(m["pos"][0], m["pos"][1], m["pos"][2], f" M{m['id']}", color=color, fontsize=9)

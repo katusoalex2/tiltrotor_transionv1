@@ -313,6 +313,8 @@ def solve_longitudinal_trim(
     tail_limit_rad: float | None = None,
     residual_tolerance: float = 0.02,
     max_rotor_omega: float | None = None,
+    max_rear_rotor_omega: float | None = None,
+    initial_guess: tuple[float, float, float, float] | None = None,
 ) -> dict[str, float | bool | np.ndarray | str]:
     """Solve steady, level longitudinal force and pitch-moment balance.
 
@@ -335,9 +337,15 @@ def solve_longitudinal_trim(
         raise ValueError("trim motor speed limit must be positive and within the rotor model limit")
     chord = max(float(aero.chord), 0.01)
     hover_omega = np.sqrt(dynamics.mass * dynamics.gravity / max(4.0 * rotor.k_thrust, 1e-12))
-    initial = np.array([0.0, min(hover_omega, omega_limit), min(hover_omega, omega_limit), 0.0])
+    rear_limit = omega_limit if max_rear_rotor_omega is None else float(max_rear_rotor_omega)
+    if not np.isfinite(rear_limit) or not 0.0 < rear_limit <= rotor.max_omega:
+        raise ValueError("rear trim motor speed limit must be positive and within the rotor model limit")
     lower = np.array([-aero.stall_angle, 0.0, 0.0, -tail_limit_rad])
-    upper = np.array([aero.stall_angle, omega_limit, omega_limit, tail_limit_rad])
+    upper = np.array([aero.stall_angle, omega_limit, rear_limit, tail_limit_rad])
+    initial = np.array([0.0, hover_omega, hover_omega, 0.0] if initial_guess is None else initial_guess)
+    if initial.shape != (4,) or not np.all(np.isfinite(initial)):
+        raise ValueError("initial trim guess must contain finite pitch, front/rear rad/s and tail radians")
+    initial = np.clip(initial, lower, upper)
     wind_ned = np.zeros(3)
 
     def evaluate(candidate: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -926,6 +934,10 @@ def assess_rotor_electrical_point(
         "motor_current_a": float(np.max(motor_current)),
         "battery_current_a": float(battery_current),
         "battery_voltage_v": float(battery_voltage),
+        "battery_power_w": float(battery_power),
+        "maximum_required_motor_voltage_v": float(np.max(motor_voltage)),
+        "motor_current_limit_a": min(values["motor_continuous_current_a"], values["esc_continuous_current_a"]),
+        "battery_current_limit_a": battery_current_limit,
     }
 
 

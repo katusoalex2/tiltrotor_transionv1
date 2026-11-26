@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.aero.wing_polar import wing_lift_drag_coefficients
 from src.dynamics.transition import assess_rotor_electrical_point
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 
 
 AIRCRAFT = load_aircraft_parameters()
@@ -224,7 +225,7 @@ def longitudinal_dynamics(
     vertical_force_up = -force_z_ned
     vertical_support_margin = vertical_force_up - MASS_KG * GRAVITY_MPS2
     wing_pitch_moment = (
-        AIRCRAFT.wing_aerodynamic_center_x_m * lift
+        -AIRCRAFT.wing_aerodynamic_center_x_m * aero_force_z_body
         + dynamic_pressure
         * WING_AREA_M2
         * AIRCRAFT.wing_mean_chord_m
@@ -238,20 +239,12 @@ def longitudinal_dynamics(
     )
     rotor_pitch_moment = 0.0
     pivot_x, pivot_z = AIRCRAFT.tilt_pivot_xz_m
-    for x, _y, z, is_tilting in AIRCRAFT.motor_positions:
+    for x, _y, _z, is_tilting in AIRCRAFT.motor_positions:
         if is_tilting:
-            relative_x, relative_z = x - pivot_x, z - pivot_z
-            rotor_x = (
-                pivot_x
-                + relative_x * ca.cos(tilt)
-                + relative_z * ca.sin(tilt)
-            )
-            rotor_z = (
-                pivot_z
-                - relative_x * ca.sin(tilt)
-                + relative_z * ca.cos(tilt)
-            )
-            moment_arm = rotor_z * ca.sin(tilt) + rotor_x * ca.cos(tilt)
+            relative_x = x - pivot_x
+            # The hub offset and thrust axis rotate together, so their
+            # cross product about the hinge has the same pitch arm at every tilt.
+            moment_arm = relative_x + pivot_x * ca.cos(tilt) + pivot_z * ca.sin(tilt)
             rotor_pitch_moment += 0.5 * tilting_pair_thrust * moment_arm
         else:
             rotor_pitch_moment += 0.5 * fixed_pair_thrust * x
@@ -586,14 +579,14 @@ def add_model_outputs(data):
 def plot_results(data):
     os.makedirs("figures", exist_ok=True)
     time = data["time_s"]
-    tilt_deg = np.rad2deg(data["tilt_rad"])
+    tilt_deg = tilt_deg_from_deflection_rad(data["tilt_rad"])
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     axes[0, 0].plot(time, tilt_deg, label="Optimized")
     _, schedule_tilt_reference = build_transition_schedule_reference(time)
     axes[0, 0].plot(
         time,
-        np.rad2deg(schedule_tilt_reference),
+        tilt_deg_from_deflection_rad(schedule_tilt_reference),
         "--",
         label="Pre-tilt schedule reference",
     )
@@ -605,7 +598,7 @@ def plot_results(data):
 
     axes[0, 1].plot(
         time,
-        np.rad2deg(data["tilt_rate_rad_s"]),
+        -np.rad2deg(data["tilt_rate_rad_s"]),
         color="tab:orange",
     )
     axes[0, 1].axhline(
@@ -733,8 +726,8 @@ def plot_results(data):
 
     csv_columns = (
         "time_s",
-        "tilt_rad",
-        "tilt_rate_rad_s",
+        "nacelle_angle_deg",
+        "nacelle_rate_deg_s",
         "alpha_rad",
         "vtail_deflection_rad",
         "vx_mps",
@@ -779,6 +772,10 @@ def plot_results(data):
         "acceleration_up",
         "pitch",
     )
+    csv_data = data | {
+        "nacelle_angle_deg": tilt_deg,
+        "nacelle_rate_deg_s": -np.rad2deg(data["tilt_rate_rad_s"]),
+    }
     with open(
         "figures/optimized_transition_curves.csv",
         "w",
@@ -788,7 +785,7 @@ def plot_results(data):
         writer = csv.writer(file)
         writer.writerow(csv_columns)
         writer.writerows(
-            [data[key][index] for key in csv_columns]
+            [csv_data[key][index] for key in csv_columns]
             for index in range(data["time_s"].size)
         )
 

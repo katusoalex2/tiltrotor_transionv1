@@ -10,7 +10,7 @@ from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import TiltrotorDynamics
 
 
-def build_aircraft_dynamics(aircraft: AircraftParameters) -> TiltrotorDynamics:
+def build_aircraft_dynamics(aircraft: AircraftParameters, *, low_speed_full_load_mps: float = 0.5) -> TiltrotorDynamics:
     rotor = RotorModel(
         aircraft.k_thrust, aircraft.max_omega,
         prop_mass_kg=aircraft.prop_mass_kg, prop_radius_m=aircraft.prop_diameter_m / 2,
@@ -27,6 +27,7 @@ def build_aircraft_dynamics(aircraft: AircraftParameters) -> TiltrotorDynamics:
     aero = AeroModel(
         aircraft.wing_area, tail, rho=aircraft.air_density,
         num_rotors=len(aircraft.motor_positions), prop_diameter_m=aircraft.prop_diameter_m,
+        low_speed_full_load_mps=low_speed_full_load_mps,
     )
     aero.CL_0 = aircraft.wing_lift_coefficient_zero
     aero.CL_alpha = aircraft.wing_lift_slope

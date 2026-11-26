@@ -34,8 +34,8 @@ def test_tilt_schedule_controls_update_curves_and_rate_warning(monkeypatch):
     app = AppTest.from_string(APP, default_timeout=60).run()
     app.selectbox(key="additional_transition_analysis").select("Tilt schedules").run()
     frame = observed["Cosine and linear tilt references versus time"]
-    assert frame["Cosine"].iloc[0] == 0.0
-    assert np.isclose(frame["Cosine"].iloc[-1], 90.0)
+    assert frame["Cosine"].iloc[0] == 90.0
+    assert np.isclose(frame["Cosine"].iloc[-1], 0.0)
     assert any("exceeds" in item.value for item in app.warning)
 
     app.slider(key="extra_tilt_duration").set_value(30.0).run()
@@ -57,7 +57,8 @@ def test_force_and_envelope_follow_controls_and_angle_convention(monkeypatch):
     app.selectbox(key="additional_transition_analysis").select("Force sweeps").run()
     assert not app.exception
     force = next(fig for alt, fig in observed if alt.startswith("Fixed-rotor-speed"))
-    assert np.isclose(force.data[1].y[0], 5.0 * 9.81)
+    assert np.isclose(force.data[1].x[-1], 90.0)
+    assert np.isclose(force.data[1].y[-1], 5.0 * 9.81)
     assert len(force.data) == 20
     app.slider(key="extra_force_speed").set_value(30.0).run()
     assert any(trace.name == "30 m/s" for trace in observed[-4][1].data)
@@ -65,12 +66,9 @@ def test_force_and_envelope_follow_controls_and_angle_convention(monkeypatch):
     observed.clear()
     app.selectbox(key="additional_transition_analysis").select("Analytical tilt-speed envelope").run()
     first = observed[-1][1]
-    original_angles = np.asarray(first.data[0].y)
-    original_mask = np.isfinite(np.asarray(first.data[0].z))
-    app.selectbox(key="extra_tilt_convention").select("90° hover, 0° cruise").run()
-    reverse = observed[-1][1]
-    np.testing.assert_allclose(reverse.data[0].y, 90.0 - original_angles)
-    np.testing.assert_array_equal(np.isfinite(np.asarray(reverse.data[0].z)), original_mask)
+    assert np.isclose(first.data[0].y[0], 90.0)
+    assert np.isclose(first.data[0].y[-1], 0.0)
+    np.testing.assert_allclose(first.data[-1].y, [90.0, 0.0])
     assert not app.exception
 
 

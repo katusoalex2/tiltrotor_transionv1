@@ -1,64 +1,4 @@
-flowchart TB
-    U(["User"]) --> DASH["Dashboard<br/>scripts/dashboard.py"]
-    U --> STAND["Standalone scripts<br/>scripts/"]
-    U --> TEST["Tests<br/>tests/"]
-
-    subgraph INPUTS["Inputs and configuration"]
-        PROFILE["Aircraft profile<br/>YAML / JSON / Excel"]
-        PARAM["Geometry, mass, inertia,<br/>propulsion and PID gains"]
-        MISSION["Mission, tilt reference<br/>and operating limits"]
-        WIND["Wind and gust settings"]
-    end
-
-    PROFILE --> DASH
-    DASH --> PARAM
-    DASH --> MISSION
-    DASH --> WIND
-
-    subgraph CORE["Main dashboard simulation"]
-        CONTROL["Guidance and control<br/>src/control/"]
-        ALLOC["Control allocation<br/>src/allocation/"]
-        PHYSICS["6-DOF aircraft dynamics<br/>src/dynamics/"]
-        AERO["Wing and V-tail aerodynamics<br/>src/aero/"]
-        DIST["Wind models<br/>src/wind/"]
-        STATE["AircraftState<br/>position, velocity, attitude, rates, tilt"]
-        CONTROL --> ALLOC
-        ALLOC -->|"rotor, tilt and tail commands"| PHYSICS
-        AERO -->|"forces and moments"| PHYSICS
-        DIST -->|"wind"| CONTROL
-        DIST -->|"wind"| PHYSICS
-        PHYSICS -->|"next state"| STATE
-        STATE -->|"feedback"| CONTROL
-    end
-
-    PARAM --> CONTROL
-    PARAM --> PHYSICS
-    MISSION --> CONTROL
-    WIND --> DIST
-    DASH -->|"run_simulation"| CORE
-    CORE --> LOG["Recorded samples and diagnostics"]
-    LOG --> RESULTS["Dashboard graphs, targets,<br/>corridor and stability assessments"]
-    RESULTS --> REPORT["Optional Word / PDF report"]
-
-    subgraph STUDIES["Additional analyses: separate workflows"]
-        SCHED["Cosine / linear tilt references"]
-        FORCES["Fixed-speed force sweeps"]
-        ENVELOPE["Analytical envelope,<br/>trim and constrained corridor"]
-        OPT["Reduced longitudinal and<br/>multi-corridor optimization"]
-        MC["Monte Carlo, gust and<br/>controller comparisons"]
-        PID["Exploratory four-rotor PID diagnostic"]
-    end
-
-    DASH -. "interactive studies" .-> STUDIES
-    STAND --> STUDIES
-    PARAM -. "selected studies" .-> STUDIES
-    STUDIES --> CURVES["Study-specific curves and data"]
-    CURVES --> U
-    RESULTS --> U
-    REPORT --> U
-    DASH -.-> PX4["Optional PX4 SITL mapping draft<br/>not actuator commands or firmware"]
-    TEST -. "checks selected components" .-> CORE
-    TEST -. "checks selected studies" .-> STUDIES"""Exploratory four-rotor PID diagnostics; not a flight-ready controller."""
+"""Exploratory four-rotor PID diagnostics; not a flight-ready controller."""
 
 import json
 import sys
@@ -73,15 +13,16 @@ sys.path.insert(0, str(ROOT))
 from src.aero.aerodynamics import AeroModel
 from src.aero.vtail import VtailModel
 from src.control.architecture import ControlLawArchitecture
-from src.control.trajectory import ReferenceTrajectory
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory
+from src.dynamics.nacelle import tilt_deg_from_deflection_rad
 from src.dynamics.rotor import RotorModel
 from src.dynamics.state import AircraftState
 from src.dynamics.tiltrotor import TiltrotorDynamics
 from src.wind.gust import DrydenGust
 
 
-PROFILE_PATH = ROOT / "figures" / "KADA UAM aircraft_profile.json"
-CORRIDOR_PATH = ROOT / "configs" / "robust_corridor.csv"
+PROFILE_PATH = ROOT / "UAM Configurations" / "illustrative_uam_simulation_profile.json"
+CORRIDOR_PATH = DEFAULT_CORRIDOR_PATH
 OUTPUT_PATH = ROOT / "simulation_results" / "master_pid_diagnostics.png"
 
 # The profile says 3000 RPM; 3000 rad/s is a separate, unverified assumption.
@@ -182,7 +123,8 @@ def simulate(
             actual_time, state.pos[0], state.pos[1], state.vel[0], state.vel[1],
             -state.pos[2], actual_ref["altitude"], -state.vel[2],
             np.rad2deg(state.att[0]), np.rad2deg(state.omega[0]),
-            np.rad2deg(state.att[1]), np.rad2deg(state.tilt), np.rad2deg(actual_ref["tilt"]),
+            np.rad2deg(state.att[1]), tilt_deg_from_deflection_rad(state.tilt),
+            tilt_deg_from_deflection_rad(actual_ref["tilt"]),
             np.rad2deg(state.att[2]), np.rad2deg(state.omega[1]),
             np.rad2deg(state.omega[2]), np.linalg.norm(wind_ned),
         )

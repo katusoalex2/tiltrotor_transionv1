@@ -39,7 +39,7 @@ def test_aerodynamic_model_uses_shared_post_stall_polar():
     force, _, _, _, _ = aero.compute_forces_and_moments(
         velocity, np.zeros(3), np.zeros(3), 0.0, 0.0,
     )
-    cl, _ = wing_lift_drag_coefficients(
+    cl, cd = wing_lift_drag_coefficients(
         alpha,
         cl_zero=aero.CL_0,
         lift_slope_per_rad=aero.CL_alpha,
@@ -49,8 +49,11 @@ def test_aerodynamic_model_uses_shared_post_stall_polar():
         oswald_efficiency=aero.oswald_efficiency,
     )
     expected_lift = 0.5 * aero.rho * speed**2 * aero.wing_area * float(cl)
+    expected_drag = 0.5 * aero.rho * speed**2 * aero.wing_area * float(cd)
+    lift_direction = np.array([np.sin(alpha), 0.0, -np.cos(alpha)])
 
-    assert -force[2] == pytest.approx(expected_lift)
+    assert force @ lift_direction == pytest.approx(expected_lift)
+    assert force @ (velocity / speed) == pytest.approx(-expected_drag)
 
 def test_rotor_thrust_squared_law():
     rotor = RotorModel(k_thrust=1.2e-5, max_omega=1000.0)

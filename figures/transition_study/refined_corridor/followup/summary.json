@@ -1,0 +1,86 @@
+{
+  "static_audit_counts": {
+    "trim_not_found": 782,
+    "passes_wingborne_screen": 1585,
+    "below_wingborne_gate": 439
+  },
+  "static_max_load_model_difference": 2.0812240819623185e-12,
+  "static_gates": "Thrust/RPM and tail travel are bounded in the trim solve. Power and wingborne incidence are screened on the stored solution. Tilt rate is assessed in replay.",
+  "cases_per_plan": 22,
+  "case_pass_counts": {
+    "0": 4,
+    "2": 4,
+    "3": 4,
+    "12": 4
+  },
+  "full_sequence_passes": [],
+  "first_violations": {
+    "passed": 16,
+    "tail_travel_reserve_deg": 47,
+    "flow_guard": 15,
+    "pitch_rate_deg_s": 7,
+    "altitude_deviation_m": 3
+  },
+  "routes": {
+    "0": {
+      "solver_error": ""
+    },
+    "2": {
+      "solver_error": ""
+    },
+    "3": {
+      "solver_error": "",
+      "completed_time_s": 32.0,
+      "altitude_deviation_m": 0.03899366154951167,
+      "pitch_deg": 11.118076697812214,
+      "pitch_rate_deg_s": 6.101250076764104,
+      "tilt_rate_deg_s": 5.409462649544111,
+      "forward_acceleration_mps2": 1.4913829042833693,
+      "vertical_acceleration_mps2": 0.12450298102872921,
+      "climb_rate_mps": 0.04778526186748139,
+      "motor_slew_rpm_s": 2414.572978657553,
+      "tail_rate_deg_s": 16.868604351400037,
+      "tail_travel_reserve_deg": 4.588468949770739,
+      "wingborne_tail_moment_reserve_nm": 1.1802033081804624,
+      "wingborne_stall_margin_deg": 9.60059839642757,
+      "differential_pitch_reserve_nm": 2.0371613471730385,
+      "motor_rpm_reserve_fraction": 0.368210377044601,
+      "current_reserve_fraction": 0.9636061534247934,
+      "voltage_headroom_v": 9.795751421298984,
+      "energy_wh": 0.16185788891930897,
+      "terminal_speed_mps": 30.000153918827273,
+      "terminal_tilt_deg": 0.0,
+      "vertical_force_closure_n": 2.5721647034515627e-12,
+      "pitch_moment_closure_nm": 1.6386822454528271e-12,
+      "nominal_failed_checks": [],
+      "wing_vertical_lift_reconstruction_error_n": 2.063238468963391e-12
+    },
+    "12": {
+      "solver_error": "",
+      "completed_time_s": 32.0,
+      "altitude_deviation_m": 0.14971098739042077,
+      "pitch_deg": 9.309135970442007,
+      "pitch_rate_deg_s": 8.399794027628117,
+      "tilt_rate_deg_s": 7.85024294426968,
+      "forward_acceleration_mps2": 1.807561979338908,
+      "vertical_acceleration_mps2": 0.2564919060034896,
+      "climb_rate_mps": 0.1413096658176219,
+      "motor_slew_rpm_s": 6000.000000001174,
+      "tail_rate_deg_s": 58.63746487808114,
+      "tail_travel_reserve_deg": 5.6021179557866345,
+      "wingborne_tail_moment_reserve_nm": 2.118055118033048,
+      "wingborne_stall_margin_deg": 9.28445942959764,
+      "differential_pitch_reserve_nm": 2.0364428897033946,
+      "motor_rpm_reserve_fraction": 0.36297104173514483,
+      "current_reserve_fraction": 0.9642548910315767,
+      "voltage_headroom_v": 9.96054396764149,
+      "energy_wh": 0.15003647279117094,
+      "terminal_speed_mps": 30.001015068967487,
+      "terminal_tilt_deg": 0.0,
+      "vertical_force_closure_n": 2.6076918402395677e-12,
+      "pitch_moment_closure_nm": 1.5189221408418163e-12,
+      "nominal_failed_checks": [],
+      "wing_vertical_lift_reconstruction_error_n": 2.1254109583423997e-12
+    }
+  }
+}

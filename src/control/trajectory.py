@@ -1,32 +1,46 @@
 """Time-parameterized reference trajectory generated from an optimized corridor."""
 
-import numpy as np
 import os
+from pathlib import Path
+
+import numpy as np
+
+from src.dynamics.nacelle import deflection_rad_from_tilt_deg, tilt_deg_from_deflection_rad
+
+
+DEFAULT_CORRIDOR_PATH = Path(__file__).resolve().parents[2] / "UAM Configurations" / "robust_corridor_elevation.csv"
 
 
 class ReferenceTrajectory:
     """Generates reference values (tilt, speed, altitude) from a corridor CSV.
 
     The corridor CSV is expected to have columns:
-        time_s, tilt_deg, altitude_m
+        time_s, nacelle_angle_deg, altitude_m
 
-    Speed is derived from tilt as:
-        speed = (tilt / tilt_max) * speed_max
+    The legacy tilt_deg column denotes deflection from vertical. The
+    controller's tilt command is also a deflection from vertical in radians.
     
     This matches the assumption used in the corridor optimization that
     speed ramps up as rotors tilt forward.
     """
 
-    def __init__(self, csv_path: str, speed_max: float = 12.0):
+    def __init__(self, csv_path: str | Path, speed_max: float = 12.0):
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Corridor file not found: {csv_path}")
 
-        data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
+        with open(csv_path, encoding="utf-8-sig") as stream:
+            header = stream.readline().strip().split(",")
+            data = np.loadtxt(stream, delimiter=",", ndmin=2)
         self.t = data[:, 0]
-        self.tilt_deg = data[:, 1]
         self.altitude_m = data[:, 2]
 
-        self.tilt_rad = np.deg2rad(self.tilt_deg)
+        if header[1] == "nacelle_angle_deg":
+            self.tilt_rad = deflection_rad_from_tilt_deg(data[:, 1])
+        elif header[1] == "tilt_deg":
+            self.tilt_rad = np.deg2rad(data[:, 1])
+        else:
+            raise ValueError("Corridor CSV needs a nacelle_angle_deg or legacy tilt_deg column")
+        self.tilt_deg = tilt_deg_from_deflection_rad(self.tilt_rad)
         self.tilt_max = self.tilt_rad[-1]
         self.speed_max = speed_max
         self.t_start = self.t[0]

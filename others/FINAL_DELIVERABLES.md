@@ -3,8 +3,74 @@
 ## Project Summary
 
 Offline 6-DOF simulation, control design, and validation tools for a V-tail
-tilt-rotor UAV transitioning from hover (0 deg tilt) to cruise (90 deg tilt),
+tilt-rotor UAV transitioning from hover (90 deg rotor angle) to cruise (0 deg rotor angle),
 including wind-gust analysis.
+
+The dashboard, geometry preview, and regenerated figures and CSVs report rotor
+angle above the forward axis. The model and its controller use the complementary
+deflection from vertical internally. For an older reference CSV, the legacy
+column name tilt_deg identifies the former convention. New reference files use
+nacelle_angle_deg.
+
+The recalculated [transition study](../figures/transition_study/summary.json)
+and [dynamic corridor](../figures/transition_study/dynamic_corridor/summary.json)
+are the current results for the bundled aircraft.
+
+### Refined corridor verification
+
+The refined study uses a 0.5 m/s by 2° grid and replays the nominal routes at
+0.01 s and 0.02 s. A dynamic cell contains an actual replay sample with an
+independent trim check at its coordinates. Each supporting route passes the
+modeled limits over the whole replay. A static-only cell can still admit a
+route that the search has yet to find.
+
+The disturbance-tested map requires a complete route to pass every sampled
+scenario with the declared margin limits. It colors only bins visited on that
+route in every tested case. Inputs include assumed changes in mass,
+longitudinal CG, lift and drag, thrust coefficient, nacelle time constant, and
+along-track gusts. The current controller and tests cover symmetric
+longitudinal motion. Lateral response, measured uncertainty, hardware limits,
+and aerodynamic validation remain open.
+
+Run the following from the repository root with the project environment.
+
+```text
+python -m scripts.refined_corridor
+python -m scripts.corridor_validation
+python -m scripts.probe_corridor_cells
+python -m scripts.probe_corridor_cells --merge
+```
+
+The [refined study summary](../figures/transition_study/refined_corridor/summary.json)
+records tested cases, thresholds, model checks, and witness counts.
+
+### Forward-only rotor transition review
+
+With equal per-rotor thrust limits and level body attitude, at rotor elevation
+β the forward-only layout has an upward thrust projection proportional to
+2(1 + sin β) and a forward projection proportional to 2 cos β. Tilting all
+four gives 4 sin β and 4 cos β. Fixed rear rotors preserve upward thrust as
+the front pair tilts and reduce the maximum forward projection. Relative
+corridor width also depends on trim, power, and actuator constraints.
+
+| Review item | Project evidence and remaining scope |
+| --- | --- |
+| Static force, pitch trim, power | Separate bounded front and rear RPM, V-tail travel, force and moment residuals, electrical check, and a wingborne incidence screen. |
+| Wing coefficients | An assumed finite-wing polar with induced drag, a post-stall model, and simplified rotor wash. Measured airfoil and installed propulsion data remain open. |
+| Dynamic tracking | Longitudinal trajectory optimization and symmetric rigid-body replay with bounded load feedback and a prescribed tilt schedule. A corridor-aware recovery scheduler remains open. |
+| Gusts and uncertainty | Full-route trials in prescribed disturbances and seeded longitudinal Dryden-like gusts. Trial fractions apply to this case set. |
+| Motor failures | Symmetric, simulated front- and rear-pair thrust loss on the selected route. Asymmetric loss, detection, and recovery remain open. |
+| SITL and HIL | The Python model supplies an offline reference. An aircraft-specific PX4/Gazebo model, autopilot replay, and bench hardware tests remain open. |
+
+Run `python -m scripts.transition_review` to reproduce the comparison, held-out
+gust checks, and simulated pair failures. The [review figure](../figures/transition_study/refined_corridor/transition_review/transition_review.png)
+shows the nominal overlap, load transfer, margins, and complete-replay outcomes.
+The selected route reaches 30.0 m/s and 0° in 32 s. It passes 9 of 26 common
+disturbance cases and all four held-out longitudinal gusts. All 417 sampled
+route coordinates admit static trim. The nominal replay visits 105 grid cells,
+84 of which are in the previously mapped static and dynamic overlap. Both
+symmetric rotor-pair outages exceed the vertical acceleration limit when
+injected at 12 s. The tested cases leave the robust corridor unestablished.
 
 **Safety status:** This is a simulation and development project, not a flight-ready
 autopilot. It has not been integrated with PX4, validated on target hardware, or
@@ -173,9 +239,8 @@ a verified safe corridor.
 The corridor trim screen follows the independent front/rear rotor-pair idea in
 Zhao et al., *Development of Multimode Flight Transition Strategy for Tilt-Rotor
 VTOL UAVs*, Drones 2023, 7, 580, https://doi.org/10.3390/drones7090580,
-sections 3.1–3.2. This project uses the opposite tilt convention (0 degrees at
-hover), and solves steady level trim rather than the paper's dynamic trajectory
-optimization. Pair speeds propagate into stability, electrical, and average
+sections 3.1–3.2. Project rotor angle is measured above forward. The trim screen
+solves steady level force and moment balance. Pair speeds propagate into stability, electrical, and average
 motor-slew screens. Simplified unmeasured aerodynamics and propulsion, static
 sign checks, and missing actuator/electrical inputs limit the results; they do
 not demonstrate a feasible or safe flight transition.

@@ -10,6 +10,8 @@ import numpy as np
 import plotly.graph_objects as go
 
 from src.control.mission import MissionProfile
+from src.dynamics.nacelle import HOVER_TILT_DEG, deflection_rad_from_tilt_deg, tilt_deg_from_deflection_rad
+from src.dynamics.rotor import tilted_rotor_position
 
 
 def build_aircraft_profile_figure(
@@ -139,7 +141,7 @@ def build_aircraft_profile_figure(
         )
         scene_points.append(vertices)
 
-    tilt = math.radians(tilt_deg)
+    tilt = deflection_rad_from_tilt_deg(tilt_deg)
     propeller_radius = propeller_diameter_in * 0.0254 / 2.0
     disk_angles = np.linspace(0.0, 2.0 * math.pi, 49)
     arrow_length = max(0.25, 2.0 * propeller_radius)
@@ -149,20 +151,15 @@ def build_aircraft_profile_figure(
         rotor_tilt = tilt if tilt_enabled else 0.0
         rotor_cosine = math.cos(rotor_tilt)
         rotor_sine = math.sin(rotor_tilt)
-        relative_x = float(x) - pivot_x
-        relative_z = float(z_down) - pivot_z_down
-        rotor_x = pivot_x + relative_x * rotor_cosine + relative_z * rotor_sine
-        rotor_z_down = (
-            pivot_z_down - relative_x * rotor_sine + relative_z * rotor_cosine
-            if tilt_enabled
-            else float(z_down)
+        rotor_x, rotor_y, rotor_z_down = tilted_rotor_position(
+            (x, y, z_down), rotor_tilt, (pivot_x, pivot_z_down),
         )
-        center = np.array([rotor_x, float(y), -rotor_z_down], dtype=float)
+        center = np.array([rotor_x, rotor_y, -rotor_z_down], dtype=float)
         color = rotor_colors[0] if tilt_enabled else rotor_colors[1]
 
         disk_x = center[0] + propeller_radius * np.cos(disk_angles) * rotor_cosine
         disk_y = center[1] + propeller_radius * np.sin(disk_angles)
-        disk_z = center[2] + propeller_radius * np.cos(disk_angles) * rotor_sine
+        disk_z = center[2] - propeller_radius * np.cos(disk_angles) * rotor_sine
         figure.add_trace(
             go.Scatter3d(
                 x=disk_x,
@@ -243,7 +240,7 @@ def build_transition_reference_animation(
     """Animate the timed mission reference, not a simulated aircraft trajectory."""
     mission = MissionProfile()
     times = np.linspace(0.0, mission.total_time, 43)
-    figure = build_aircraft_profile_figure(aircraft_name, values, 0.0)
+    figure = build_aircraft_profile_figure(aircraft_name, values, HOVER_TILT_DEG)
     rotor_indices = [
         index for index, trace in enumerate(figure.data)
         if trace.name and trace.name.startswith("Rotor ")
@@ -256,7 +253,7 @@ def build_transition_reference_animation(
     frames = []
     steps = []
     for time in times:
-        angle = math.degrees(float(mission.at(float(time))["tilt"]))
+        angle = tilt_deg_from_deflection_rad(float(mission.at(float(time))["tilt"]))
         preview = build_aircraft_profile_figure(aircraft_name, values, angle)
         for axis in axis_names:
             axis_range = getattr(preview.layout.scene, axis).range
@@ -279,7 +276,7 @@ def build_transition_reference_animation(
 
     figure.frames = frames
     figure.update_layout(
-        title={"text": "REFERENCE ONLY — 0.0 s, tilt 0.0°", "x": 0.02},
+        title={"text": f"REFERENCE ONLY — 0.0 s, tilt {HOVER_TILT_DEG:.1f}°", "x": 0.02},
         scene={axis: {"range": bounds[axis]} for axis in axis_names},
         annotations=[{
             "text": "REFERENCE ONLY — NOT SIMULATED FLIGHT",

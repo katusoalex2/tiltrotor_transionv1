@@ -1,13 +1,18 @@
 """Aerodynamic forces and moments with Wind Triangle and Rotor Wash."""
 import numpy as np
 from src.aero.vtail import VtailModel
-from src.aero.wing_polar import wing_lift_drag_coefficients
+from src.aero.wing_polar import low_speed_aerodynamic_factor, wing_lift_drag_coefficients
+from src.dynamics.frames import rotation_body_to_wind, rotation_earth_to_body
 
 class AeroModel:
-    def __init__(self, wing_area: float, vtail: VtailModel, rho: float = 1.225, num_rotors: int = 4, prop_diameter_m: float = 0.3):
+    def __init__(self, wing_area: float, vtail: VtailModel, rho: float = 1.225, num_rotors: int = 4, prop_diameter_m: float = 0.3,
+                 *, low_speed_full_load_mps: float = 0.5):
         self.wing_area = wing_area
         self.vtail = vtail
         self.rho = rho
+        if not np.isfinite(low_speed_full_load_mps) or low_speed_full_load_mps < 0.5:
+            raise ValueError("full-load onset speed must be finite and at least 0.5 m/s")
+        self.low_speed_full_load_mps = low_speed_full_load_mps
         
         self.CL_alpha = 4.0
         self.CL_0 = 0.1
@@ -28,7 +33,6 @@ class AeroModel:
 
     def compute_forces_and_moments(self, vel_earth: np.ndarray, wind_earth: np.ndarray, att: np.ndarray, total_thrust: float, tilt_angle: float):
         vel_air_earth = vel_earth - wind_earth
-        from src.dynamics.frames import rotation_earth_to_body
         R_e2b = rotation_earth_to_body(att[0], att[1], att[2])
         vel_body = R_e2b @ vel_air_earth
         
@@ -61,11 +65,15 @@ class AeroModel:
             oswald_efficiency=self.oswald_efficiency,
         )
 
-        q_bar = 0.5 * self.rho * (V_T_eff ** 2)
+        activation = low_speed_aerodynamic_factor(V_T, self.low_speed_full_load_mps)
+        q_bar = activation * 0.5 * self.rho * (V_T_eff ** 2)
         lift = q_bar * self.wing_area * CL
         drag = q_bar * self.wing_area * CD
         
-        force_body = np.array([-drag, 0.0, -lift])
+        # Wash changes the coefficients and dynamic pressure. Resolve the
+        # whole-wing lift and drag along the aircraft's freestream wind axes.
+        wind_to_body = rotation_body_to_wind(alpha, beta).T
+        force_body = wind_to_body @ np.array([-drag, 0.0, -lift])
         
         r_ac = np.array([self.x_ac, 0.0, 0.0])
         moment_cross = np.cross(r_ac, force_body)
@@ -77,4 +85,9 @@ class AeroModel:
 
     def compute_tail_forces(self, vel_earth: np.ndarray, wind_earth: np.ndarray, att: np.ndarray, delta_left: float, delta_right: float):
         vel_air_earth = vel_earth - wind_earth
-        return self.vtail.compute_forces_and_moments(vel_air_earth, att, delta_left, delta_right)
+        force, moment = self.vtail.compute_forces_and_moments(vel_air_earth, att, delta_left, delta_right)
+        if self.low_speed_full_load_mps > 0.5:
+            activation = low_speed_aerodynamic_factor(np.linalg.norm(vel_air_earth), self.low_speed_full_load_mps)
+            force = activation * force
+            moment = activation * moment
+        return force, moment

@@ -229,8 +229,8 @@ def build_deck():
         "• Dryden-like turbulence, gust sweeps, Monte Carlo controller comparisons, and corridor optimizers provide offline analysis.\n\n"
         "• A separate CasADi/IPOPT point-mass model optimizes a 15 s transition.",
         "Headline result",
-        "• Tilt convention: 0° hover → 90° forward flight.\n\n"
-        "• The reduced-model optimum ends at 12 m/s and 100 m altitude.\n\n"
+        "• Project rotor angle: 90° upward in hover and 0° forward in cruise.\n\n"
+        "• The legacy reduced model targets 12 m/s and 100 m altitude. The corrected pitch-trim analysis rejects that endpoint under the configured travel limit.\n\n"
         "• Existing full-simulation plots also show substantial tracking error and gust response.\n\n"
         "• Monte Carlo evidence varies by script and run configuration.\n\n"
         "• No output in this project establishes flight readiness.",
@@ -244,7 +244,7 @@ def build_deck():
         1.35,
         11.7,
         1.0,
-        "Project convention:  β = 0° (rotors vertical / hover)  →  β = 90° (rotors forward / cruise)\n"
+        "Project rotor angle:  90° (rotors vertical / hover)  →  0° (rotors forward / cruise)\n"
         "Body: Forward–Right–Down (FRD)     Earth: North–East–Down (NED)",
         size=18,
     )
@@ -254,9 +254,9 @@ def build_deck():
         2.7,
         5.6,
         3.8,
-        "In the supplied sketch, the symbol β starts at 90° and decreases to 0°. That angle is the complement of the project’s tilt angle:\n\n"
-        "β_project = 90° − β_sketch\n\n"
-        "Keep this conversion explicit when comparing plots or integrating the sketch’s equations.",
+        "The project and the supplied sketch measure the rotor angle above the forward axis. The equations below use the internal rotor deflection β:\n\n"
+        "β = 90° − project rotor angle\n\n"
+        "β increases from 0° in hover to 90° with the rotors forward.",
         size=17,
     )
     add_image_fit(slide, FIGURES / "tilt_convention_conversion.png", 6.7, 2.15, 5.7, 4.25)
@@ -282,7 +282,7 @@ def build_deck():
         3.5,
         "The cosine schedule has zero tilt rate at its start and finish. Its peak rate is:\n\n"
         "max |β̇| = 45π/t_d  deg/s\n\n"
-        "The project reference implements this in the 0°→90° convention. The plotted example uses a 2 s hold and 10 s transition; the optimized run uses a 15 s total horizon.",
+        "These equations use model deflection β. The plotted rotor angle equals 90° − β. The example uses a 2 s hold and 10 s transition.",
         size=16,
     )
     add_image_fit(slide, FIGURES / "tilt_schedule_comparison.png", 6.1, 2.25, 6.3, 4.25)
@@ -613,7 +613,7 @@ def build_deck():
     slide = content_slide(prs, "Optimized run: results at a glance", "RESULTS")
     metrics = [
         ("Horizon", "15.0 s  |  60 intervals"),
-        ("Final state", "90° tilt  |  12 m/s forward  |  100 m altitude"),
+        ("Legacy target", "0° rotor angle  |  12 m/s forward  |  100 m altitude"),
         ("Altitude range", "100.00–100.44 m  |  0 m loss"),
         ("Peak tilt rate", "13.78°/s  |  limit 20.05°/s"),
         ("Pair-thrust range", "Tilting: 2.73–24.98 N  |  Fixed: 23.99–35.82 N"),
@@ -1048,7 +1048,7 @@ def build_deck():
         5.75,
         5.35,
         "Symbols\n"
-        "β — nacelle tilt; 0° hover, 90° forward\n"
+        "β — internal deflection from vertical; project rotor angle equals 90° − β\n"
         "T_t, T_f — total tilting/fixed pair thrust (N)\n"
         "v_x, v_z — forward/upward velocity (m/s)\n"
         "h — altitude (m); γ — flight-path angle\n"

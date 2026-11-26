@@ -14,6 +14,7 @@ import numpy as np
 from src.configuration.aircraft_models import build_aircraft_dynamics
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.frames import rotation_body_to_earth
+from src.dynamics.nacelle import TILT_CONVENTION, deflection_rad_from_tilt_deg
 from src.dynamics.rotor import tilted_rotor_position
 
 
@@ -79,7 +80,7 @@ def main():
 
     dynamics, hover_omega, aircraft = build_dynamics()
     tilt_deg = np.linspace(0.0, 90.0, 46)
-    tilt_rad = np.deg2rad(tilt_deg)
+    tilt_rad = deflection_rad_from_tilt_deg(tilt_deg)
     airspeeds = np.array([0.0, 5.0, 10.0, 15.0, 20.0])
     results = {
         key: np.empty((airspeeds.size, tilt_deg.size), dtype=float)
@@ -125,7 +126,7 @@ def main():
     axes[1, 0].set_ylabel("Force (N)")
     axes[1, 1].set_ylabel("Force (N)")
     for axis in axes.flat:
-        axis.set_xlabel("Tilt (deg; 0° hover, 90° forward)")
+        axis.set_xlabel(f"Rotor angle ({TILT_CONVENTION})")
         axis.grid      (True, alpha=0.3)
         axis.legend    (title="Airspeed")
     fig.suptitle(

@@ -13,13 +13,14 @@ import numpy as np
 
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.transition import rear_thrust_sensitivity_sweep
+from src.dynamics.nacelle import tilt_deg_from_deflection_deg
 
 
 def main():
     aircraft = load_aircraft_parameters()
     result = rear_thrust_sensitivity_sweep(aircraft)
     thrust = np.asarray(result["max_thrust_per_rotor_n"], dtype=float)
-    tilt = np.asarray(result["tilt_deg"], dtype=float)
+    tilt = tilt_deg_from_deflection_deg(np.asarray(result["tilt_deg"], dtype=float))
     minimum_speed = np.asarray(result["minimum_speed_mps"], dtype=float)
     vertical_margin = np.asarray(result["vertical_margin_at_zero_speed_n"], dtype=float)
     feasible = np.asarray(result["feasible"], dtype=bool)
@@ -67,7 +68,7 @@ def main():
     axes[1].axvline(threshold, color="black", linestyle="--", label="Rear-only threshold")
     axes[1].axvline(configured, color="red", linestyle=":", label="YAML-derived estimate")
     axes[1].set_xlabel("Assumed max thrust per rotor (N)")
-    axes[1].set_ylabel("Minimum speed at 90° tilt (m/s)")
+    axes[1].set_ylabel("Minimum speed at 0° rotor angle (m/s)")
     axes[1].set_title("Full-tilt boundary sensitivity")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
@@ -80,7 +81,7 @@ def main():
 
     print(f"Rear-only threshold: {threshold:.2f} N per rotor")
     print(f"YAML-derived estimate: {configured:.2f} N per rotor")
-    print(f"Minimum speed at 90 degrees (YAML estimate): {minimum_speed[np.argmin(np.abs(thrust - configured)), -1]:.2f} m/s")
+    print(f"Minimum speed at 0 degrees (YAML estimate): {minimum_speed[np.argmin(np.abs(thrust - configured)), -1]:.2f} m/s")
     print("Sensitivity results are not measured thrust or flight-validation evidence.")
     print(f"Saved {csv_path}")
     print(f"Saved {plot_path}")

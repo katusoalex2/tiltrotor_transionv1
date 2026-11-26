@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.control.reference import TransitionReference
+from src.dynamics.nacelle import tilt_deg_from_deflection_deg, tilt_deg_from_deflection_rad
 
 
 def main():
@@ -29,10 +30,10 @@ def main():
         transition_time=transition_time,
         tilt_hold_time=hold_time,
     )
-    smooth_tilt = np.rad2deg(
+    smooth_tilt = tilt_deg_from_deflection_rad(
         np.array([smooth_reference.at(t)["tilt"] for t in times])
     )
-    linear_tilt = np.rad2deg(
+    linear_tilt = tilt_deg_from_deflection_rad(
         np.pi / 2 * np.clip(times / transition_time, 0.0, 1.0)
     )
     smooth_rate = np.gradient(smooth_tilt, dt)
@@ -61,16 +62,16 @@ def main():
     )
     plt.close(fig)
 
-    image_convention_tilt = 90.0 - smooth_tilt
+    model_deflection = tilt_deg_from_deflection_deg(smooth_tilt)
     fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes[0].plot(times, image_convention_tilt, color="tab:orange", linewidth=2)
-    axes[0].set_ylabel("Image angle (deg)")
-    axes[0].set_title("Image convention: 90° hover → 0° cruise")
+    axes[0].plot(times, smooth_tilt, color="tab:orange", linewidth=2)
+    axes[0].set_ylabel("Rotor angle (deg)")
+    axes[0].set_title("Project angle (90° upward, 0° forward)")
     axes[0].grid(True, alpha=0.3)
-    axes[1].plot(times, smooth_tilt, color="tab:purple", linewidth=2)
+    axes[1].plot(times, model_deflection, color="tab:purple", linewidth=2)
     axes[1].set_xlabel("Time (s)")
-    axes[1].set_ylabel("Project angle (deg)")
-    axes[1].set_title("Project convention: 0° hover → 90° cruise")
+    axes[1].set_ylabel("Deflection (deg)")
+    axes[1].set_title("Internal deflection from vertical")
     axes[1].grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(

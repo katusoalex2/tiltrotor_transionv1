@@ -17,15 +17,16 @@ from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.rotor import tilted_rotor_position
 from src.dynamics.state import AircraftState
 from src.dynamics.transition import solve_longitudinal_trim
+from src.dynamics.nacelle import CRUISE_TILT_DEG, deflection_rad_from_tilt_deg
 
 
 ENDPOINT_SPEED_MPS = 12.0
-ENDPOINT_TILT_DEG = 90.0
+ENDPOINT_TILT_DEG = CRUISE_TILT_DEG
 ADDITIONAL_ASSUMED_TAIL_LIMITS_DEG = (15.0, 20.0, 30.0, 45.0)
 
 
 def _moment_budget(aircraft, dynamics, trim, speed_mps, tilt_deg, tail_limit_deg):
-    tilt_rad = np.deg2rad(tilt_deg)
+    tilt_rad = deflection_rad_from_tilt_deg(tilt_deg)
     alpha_rad = np.deg2rad(trim["alpha_deg"])
     tail_rad = np.deg2rad(trim["tail_deflection_deg"])
     front_omega = float(trim["front_motor_rpm"]) * 2.0 * np.pi / 60.0
@@ -186,7 +187,7 @@ def build_endpoint_budget():
         trim = solve_longitudinal_trim(
             dynamics,
             ENDPOINT_SPEED_MPS,
-            np.deg2rad(ENDPOINT_TILT_DEG),
+            deflection_rad_from_tilt_deg(ENDPOINT_TILT_DEG),
             tail_limit_rad=np.deg2rad(tail_limit_deg),
         )
         rows.append(_moment_budget(

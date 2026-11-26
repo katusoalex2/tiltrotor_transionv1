@@ -1,0 +1,21 @@
+{
+  "tilt_convention": "90 deg upward (hover), 0 deg forward (cruise)",
+  "routes_attempted": 12,
+  "routes_verified": 9,
+  "grid_cells": 589,
+  "witnessed_cells": 225,
+  "witnessed_cells_with_static_center_trim": 223,
+  "observed_directed_cell_transitions": 304,
+  "speed_cell_width_mps": 1,
+  "tilt_cell_width_deg": 5,
+  "target_speed_mps": 30.0,
+  "transition_duration_s": 32.0,
+  "alternate_route_terminal_hold_s": 2.0,
+  "replay_step_s": 0.02,
+  "flow_guard_comparison_tolerance_deg": 0.05,
+  "aerodynamic_load_onset_mps": [
+    0.5,
+    2.5
+  ],
+  "dynamic_cell_definition": "At least one exact sampled state in the cell has trim and lies on a verified full route."
+}

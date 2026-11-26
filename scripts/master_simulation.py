@@ -11,7 +11,7 @@ from src.dynamics.state import AircraftState
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, step_collective
 from src.control.cascade import CascadeController
-from src.control.trajectory import ReferenceTrajectory
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory
 from src.control.pid import PIDController
 from src.wind.gust import DrydenGust
 
@@ -60,7 +60,7 @@ def main():
     controller = PIDCascade(aircraft.mass, 4 * aircraft.k_thrust, aircraft.max_omega, aircraft.gravity)
 
     # 3. Load the optimized robust corridor
-    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
+    ref = ReferenceTrajectory(DEFAULT_CORRIDOR_PATH, speed_max=12.0)
 
     # 4. Setup a 3.5 m/s Dryden wind gust
     wind = DrydenGust(sigma=(3.5, 3.5, 2.1), airspeed=12.0, seed=99)

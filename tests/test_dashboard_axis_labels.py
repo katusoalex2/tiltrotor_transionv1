@@ -162,7 +162,7 @@ def test_computed_corridor_displays_unqualified_trim_points(monkeypatch):
     speed_indices, tilt_indices = np.where(trim_only)
     assert speed_indices.size > 0
     np.testing.assert_array_equal(trace.x, result["airspeeds_mps"][speed_indices])
-    np.testing.assert_array_equal(trace.y, result["tilt_angles_deg"][tilt_indices])
+    np.testing.assert_array_equal(trace.y, 90.0 - result["tilt_angles_deg"][tilt_indices])
     np.testing.assert_array_equal(
         trace.customdata[:, 0], result["stability_map"]["trim_front_motor_rpm"][trim_only]
     )

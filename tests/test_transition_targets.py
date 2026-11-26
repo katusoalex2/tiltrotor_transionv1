@@ -11,7 +11,7 @@ def samples():
         "alt": np.array([100.0, 99.5, 98.766, 100.0]),
         "ref_alt": np.full(4, 100.0),
         "pitch": np.array([0.0, 2.0, 2.8, 2.8]),
-        "tilt": np.array([0.0, 10.0, 90.0, 90.0]),
+        "tilt": np.array([90.0, 80.0, 0.0, 0.0]),
         "V_T": np.array([0.0, 14.99, 15.0, 15.0]),
         "u_body": np.array([0.0, 14.99, 15.0 * np.cos(alpha), 15.0]),
         "w_body": np.array([0.0, 0.0, 15.0 * np.sin(alpha), 0.0]),

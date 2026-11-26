@@ -41,6 +41,16 @@ def test_trajectory_ends_at_cruise(sample_corridor):
     assert np.isclose(r["speed"], 12.0)
 
 
+def test_rotor_angle_csv_preserves_motion_of_legacy_reference(tmp_path, sample_corridor):
+    path = tmp_path / "corridor.csv"
+    path.write_text("time_s,nacelle_angle_deg,altitude_m\n0,90,100\n5,45,95\n10,0,90\n")
+    trajectory = ReferenceTrajectory(str(path))
+    legacy = ReferenceTrajectory(sample_corridor)
+    np.testing.assert_allclose(trajectory.tilt_deg, [90.0, 45.0, 0.0])
+    for time in (0.0, 2.5, 5.0, 10.0):
+        assert trajectory.at(time) == pytest.approx(legacy.at(time))
+
+
 def test_trajectory_interpolates(sample_corridor):
     traj = ReferenceTrajectory(sample_corridor, speed_max=12.0)
     r = traj.at(5.0)

@@ -1,10 +1,12 @@
 """Rigorous Mass Properties, Inertia Tensor, and Stability."""
+from pathlib import Path
+
 import numpy as np
 import yaml
 from src.dynamics.rotor import tilted_rotor_position
 
 class MassProperties:
-    def __init__(self, config_path="configs/blue_uam.yaml"):
+    def __init__(self, config_path=Path(__file__).resolve().parents[2] / "UAM Configurations" / "blue_uam.yaml"):
         with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
             

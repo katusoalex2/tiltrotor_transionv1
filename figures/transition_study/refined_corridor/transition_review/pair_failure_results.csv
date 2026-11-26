@@ -1,0 +1,3 @@
+failed_pair,injection_time_s,completed_time_s,passed,failed_checks,first_violated_constraint,first_violation_time_s,airspeed_at_injection_mps
+front,12.0,12.0,False,vertical_acceleration_mps2 differential_pitch_reserve_nm incomplete,vertical_acceleration_mps2,12.0,10.037245109672885
+rear,12.0,12.0,False,vertical_acceleration_mps2 differential_pitch_reserve_nm incomplete,vertical_acceleration_mps2,12.0,10.037245109672885

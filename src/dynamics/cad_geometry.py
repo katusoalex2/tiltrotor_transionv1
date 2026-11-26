@@ -2,6 +2,8 @@
 import numpy as np
 import yaml
 from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.dynamics.nacelle import deflection_rad_from_tilt_deg
+from src.dynamics.rotor import tilted_rotor_position
 
 class CadGeometry:
     def __init__(self, config_path=None):
@@ -45,13 +47,13 @@ class CadGeometry:
         
         sweep_rad = np.arctan2((tip_le[0] - root_le[0]), b_2)
         x_mac = root_le[0] + (b_2 / 3.0) * ((1 + 2*taper) / (1 + taper)) * np.tan(sweep_rad)
-        ac_x = x_mac + 0.25 * mac
+        ac_x = x_mac - 0.25 * mac
         
         return {"mac": mac, "ac_x": ac_x, "span": b, "area": b * ((c_r + c_t) / 2.0)}
 
     def calculate_tilted_motors(self, tilt_angle_deg):
-        tilt_rad = np.deg2rad(tilt_angle_deg)
-        pivot_x, pivot_z = self.tilt_pivot_xz
+        """Return motor hubs and thrust axes at the project's rotor angle."""
+        tilt_rad = deflection_rad_from_tilt_deg(tilt_angle_deg)
         tilted_motors = []
         motors = self.offsets.get('motors', [[0.3, 0.4, 0.0, True], [0.3, -0.4, 0.0, True], [-0.3, 0.4, 0.0, False], [-0.3, -0.4, 0.0, False]])
         
@@ -62,11 +64,8 @@ class CadGeometry:
                 pos_x, pos_y, pos_z = m; tilts = i < 2
             
             if tilts:
-                rel_x = pos_x - pivot_x
-                rel_z = pos_z - pivot_z
-                new_rel_x = rel_x * np.cos(tilt_rad) + rel_z * np.sin(tilt_rad)
-                new_rel_z = -rel_x * np.sin(tilt_rad) + rel_z * np.cos(tilt_rad)
-                tilted_motors.append({"id": i+1, "pos": [pivot_x + new_rel_x, pos_y, pivot_z + new_rel_z], "thrust_dir": [np.sin(tilt_rad), 0, -np.cos(tilt_rad)], "tilts": True})
+                position = tilted_rotor_position(m, tilt_rad, self.tilt_pivot_xz)
+                tilted_motors.append({"id": i+1, "pos": position.tolist(), "thrust_dir": [np.sin(tilt_rad), 0, -np.cos(tilt_rad)], "tilts": True})
             else:
                 tilted_motors.append({"id": i+1, "pos": [pos_x, pos_y, pos_z], "thrust_dir": [0, 0, -1], "tilts": False})
         return tilted_motors

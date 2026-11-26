@@ -1,0 +1,7 @@
+route_id,airspeed_target_mps,rotor_angle_target_deg,arrival_time_s,status,diagnostic,witness_speed_mps,witness_angle_deg
+100,12.0,80.0,11.25,unverified_after_replay,vertical_acceleration_mps2 wingborne_stall_margin_deg incomplete,,
+101,12.0,80.0,15.625,unverified_after_replay,vertical_acceleration_mps2 wingborne_stall_margin_deg incomplete,,
+102,20.0,6.0,16.5625,verified,,19.76828511605536,6.3366742338509425
+103,20.0,6.0,20.9375,verified,,19.764831325738058,6.85801607421476
+104,25.0,70.0,20.0,solver_did_not_find_route,Solver failed. You may use opti.debug.value to investigate the latest values of variables. return_status is 'Infeasible_Problem_Detected',,
+105,25.0,70.0,24.375,solver_did_not_find_route,Solver failed. You may use opti.debug.value to investigate the latest values of variables. return_status is 'Infeasible_Problem_Detected',,

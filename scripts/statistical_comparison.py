@@ -18,7 +18,7 @@ from scipy import stats
 from src.dynamics.state import AircraftState
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
-from src.control.trajectory import ReferenceTrajectory
+from src.control.trajectory import DEFAULT_CORRIDOR_PATH, ReferenceTrajectory
 from src.control.pid import PIDController
 from src.wind.gust import DrydenGust
 
@@ -68,7 +68,7 @@ def run_one(gust_sigma, seed, controller_type, dt=0.01):
     else:
         controller = build_collective_controller(aircraft)
 
-    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
+    ref = ReferenceTrajectory(DEFAULT_CORRIDOR_PATH, speed_max=12.0)
     wind = DrydenGust(sigma=(gust_sigma, gust_sigma, gust_sigma * 0.6),
                        airspeed=12.0, seed=seed)
 

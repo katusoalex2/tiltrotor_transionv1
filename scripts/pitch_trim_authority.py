@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from src.configuration.aircraft_models import build_aircraft_dynamics
 from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.transition import constrained_transition_corridor
+from src.dynamics.nacelle import tilt_deg_from_deflection_deg
 
 
 AIR_SPEEDS_MPS = np.arange(0.0, 12.0 + 1e-9, 2.0)
@@ -49,7 +50,7 @@ def build_pitch_trim_map():
             trim_feasible = bool(stability["trim_feasible"][speed_index, tilt_index])
             rows.append({
                 "airspeed_mps": float(airspeed_mps),
-                "tilt_deg": float(tilt_deg),
+                "tilt_deg": float(tilt_deg_from_deflection_deg(tilt_deg)),
                 "trim_feasible": trim_feasible,
                 "alpha_deg": float(
                     stability["trim_alpha_deg"][speed_index, tilt_index]
