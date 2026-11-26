@@ -7,6 +7,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.dynamics.reduced_transition import altitude_acceleration
 
 
 N = 50
@@ -16,24 +18,14 @@ TILT_MAX = np.pi / 2
 ALT_START = 100.0
 
 
-def altitude_dynamics(tilt, vz, tilt_rate_extra=0.0):
+def altitude_dynamics(tilt, vz, tilt_rate_extra=0.0, aircraft=None):
     """Approximate vertical acceleration given tilt angle."""
-    mass = 5.0
-    g = 9.81
-    k_thrust = 1e-5
-    omega_hover = np.sqrt(mass * g / k_thrust)
-    thrust_vert = k_thrust * (omega_hover ** 2) * np.cos(tilt)
-    rho = 1.225
-    wing_area = 1.5
-    v_forward = 12.0 * (tilt / TILT_MAX)
-    CL = 0.5
-    lift = 0.5 * rho * wing_area * CL * (v_forward ** 2) * np.sin(tilt)
-    a_z = (thrust_vert + lift - mass * g) / mass
-    return a_z + tilt_rate_extra
+    return altitude_acceleration(tilt, aircraft if aircraft is not None else load_aircraft_parameters()) + tilt_rate_extra
 
 
 def solve_corridor(robust: bool):
     """Solve corridor optimization. If robust=True, tighten constraints."""
+    aircraft = load_aircraft_parameters()
     opti = ca.Opti()
 
     tilt = opti.variable(N + 1)
@@ -44,7 +36,7 @@ def solve_corridor(robust: bool):
 
     # --- Base dynamics constraints ---
     for k in range(N):
-        a_z = altitude_dynamics(tilt[k], vz[k])
+        a_z = altitude_dynamics(tilt[k], vz[k], aircraft=aircraft)
         opti.subject_to(alt[k + 1] == alt[k] + vz[k] * DT)
         opti.subject_to(vz[k + 1] == vz[k] + a_z * DT)
         opti.subject_to(tilt[k + 1] == tilt[k] + tilt_dot[k] * DT)
@@ -58,10 +50,10 @@ def solve_corridor(robust: bool):
 
     # --- Constraint: TILT RATE LIMIT ---
     if robust:
-        # ROBUST: cap tilt rate at 70% of hardware max, leaving 30% headroom
-        max_tilt_rate = 0.35 * 0.85  # 0.2975 rad/s = ~17 deg/s
+        # Reduced-rate scenario: 85% of configured maximum.
+        max_tilt_rate = aircraft.max_tilt_rate * 0.85
     else:
-        max_tilt_rate = 0.35  # Nominal: use full 20 deg/s
+        max_tilt_rate = aircraft.max_tilt_rate
 
     opti.subject_to(opti.bounded(0.0, tilt, TILT_MAX))
     opti.subject_to(opti.bounded(-max_tilt_rate, tilt_dot, max_tilt_rate))
@@ -87,10 +79,7 @@ def solve_corridor(robust: bool):
     opti.set_initial(alt, np.full(N + 1, ALT_START))
     opti.set_initial(max_loss, 5.0)
 
-    try:
-        sol = opti.solve()
-    except RuntimeError:
-        sol = opti.debug
+    sol = opti.solve()
 
     return {
         "tilt": np.array(sol.value(tilt)),
@@ -108,7 +97,7 @@ def main():
     print(f"  Max altitude loss: {nominal['max_loss']:.2f} m")
     print(f"  Max tilt rate used: {np.rad2deg(nominal['max_tilt_rate_used']):.2f} deg/s")
 
-    print("\nSolving ROBUST corridor (70% tilt rate cap, 5m loss allowed)...")
+    print("\nSolving ROBUST corridor (85% tilt rate cap, 10m loss allowed)...")
     robust = solve_corridor(robust=True)
     print(f"  Max altitude loss: {robust['max_loss']:.2f} m")
     print(f"  Max tilt rate used: {np.rad2deg(robust['max_tilt_rate_used']):.2f} deg/s")
@@ -137,7 +126,7 @@ def main():
     axes[1].plot(t_arr, nominal["alt"], 'b-', linewidth=2, label="Nominal")
     axes[1].plot(t_arr, robust["alt"], 'r--', linewidth=2, label="Robust")
     axes[1].axhline(90, color='orange', linestyle=':', label="Nominal floor (90m)")
-    axes[1].axhline(95, color='red', linestyle=':', label="Robust floor (95m)")
+    axes[1].axhline(90, color='red', linestyle=':', label="Robust floor (90m)")
     axes[1].set_xlabel("Time (s)")
     axes[1].set_ylabel("Altitude (m)")
     axes[1].set_title("Altitude Profiles: Nominal vs Robust")
@@ -146,8 +135,9 @@ def main():
 
     axes[2].plot(t_arr[:-1], np.rad2deg(nominal["tilt_dot"]), 'b-', linewidth=2, label="Nominal")
     axes[2].plot(t_arr[:-1], np.rad2deg(robust["tilt_dot"]), 'r--', linewidth=2, label="Robust")
-    axes[2].axhline(20, color='k', linestyle=':', label="Hardware limit")
-    axes[2].axhline(14, color='red', linestyle=':', label="Robust cap")
+    configured_rate = np.rad2deg(load_aircraft_parameters().max_tilt_rate)
+    axes[2].axhline(configured_rate, color='k', linestyle=':', label="Configured limit")
+    axes[2].axhline(0.85 * configured_rate, color='red', linestyle=':', label="85% cap")
     axes[2].set_xlabel("Time (s)")
     axes[2].set_ylabel("Tilt rate (deg/s)")
     axes[2].set_title("Tilt Rate: Nominal vs Robust")
@@ -159,14 +149,15 @@ def main():
     plt.show()
 
     # --- Save the robust corridor as the final specification ---
+    corridor_path = os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv")
     np.savetxt(
-        "configs/robust_corridor.csv",
+        corridor_path,
         np.column_stack([t_arr, np.rad2deg(robust["tilt"]), robust["alt"]]),
         delimiter=",",
         header="time_s,tilt_deg,altitude_m",
         comments="",
     )
-    print("\nSaved robust corridor to configs/robust_corridor.csv")
+    print(f"\nSaved robust corridor to {corridor_path}")
 
 
 if __name__ == "__main__":

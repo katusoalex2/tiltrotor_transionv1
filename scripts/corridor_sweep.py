@@ -3,21 +3,19 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import matplotlib.pyplot as plt
 import numpy as np
 from src.dynamics.state import AircraftState
-from src.dynamics.rotor import RotorModel
-from src.dynamics.tiltrotor import TiltrotorDynamics
-from src.aero.vtail import VtailModel
-from src.aero.aerodynamics import AeroModel
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, step_collective
 from src.control.pid import PIDController
 
 def simulate_transition(tilt_rate_deg_per_s, duration=15.0, dt=0.01):
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=0.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1,0.1,0.2]), aero=aero)
+    aircraft = load_aircraft_parameters()
+    if len(aircraft.motor_positions) != 4:
+        raise ValueError("this simulation requires exactly four rotors")
+    dyn = build_aircraft_dynamics(aircraft)
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, 100.0])
     state.vel = np.array([5.0, 0.0, 0.0])
-    omega_hover = np.sqrt(dyn.mass * 9.81 / rotor.k_thrust)
+    omega_hover = np.sqrt(dyn.mass * aircraft.gravity / (4 * aircraft.k_thrust))
     alt_pid = PIDController(kp=0.5, ki=0.05, kd=0.1, limit=200.0)
     pitch_pid = PIDController(kp=2.0, ki=0.5, kd=0.1, limit=0.5)
     tilt_rate = np.deg2rad(tilt_rate_deg_per_s)
@@ -26,9 +24,12 @@ def simulate_transition(tilt_rate_deg_per_s, duration=15.0, dt=0.01):
     for _ in range(int(duration/dt)):
         tilt_cmd = min(t * tilt_rate, np.pi/2)
         alt = 100.0 - state.pos[2]
-        omega_cmd = np.clip(omega_hover + alt_pid.compute(100.0, alt, dt), 0.0, 3000.0)
+        omega_cmd = np.clip(omega_hover + alt_pid.compute(100.0, alt, dt), 0.0, aircraft.max_omega)
         vtail_def = pitch_pid.compute(0.0, state.att[1], dt)
-        state = dyn.step(state, omega_cmd, tilt_cmd, vtail_def, vtail_def, dt)
+        state = step_collective(dyn, state, {
+            "omega": omega_cmd, "tilt": tilt_cmd,
+            "delta_left": vtail_def, "delta_right": vtail_def,
+        }, dt)
         t += dt
         log['t'].append(t); log['alt'].append(alt); log['vx'].append(state.vel[0])
         log['lift'].append(state.lift); log['pitch'].append(np.rad2deg(state.att[1]))

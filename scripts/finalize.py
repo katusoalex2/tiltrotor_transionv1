@@ -9,10 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.dynamics.state import AircraftState
-from src.dynamics.rotor import RotorModel
-from src.dynamics.tiltrotor import TiltrotorDynamics
-from src.aero.vtail import VtailModel
-from src.aero.aerodynamics import AeroModel
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, step_collective
 from src.control.trajectory import ReferenceTrajectory
 from src.control.pid import PIDController
 from src.wind.gust import DrydenGust
@@ -20,9 +18,11 @@ from src.wind.gust import DrydenGust
 
 class FinalPIDCascade:
     """The final selected controller architecture (PID inner loop)."""
-    def __init__(self, mass, k_thrust):
+    def __init__(self, mass, k_thrust, max_omega, gravity):
         self.mass = mass
         self.k_thrust = k_thrust
+        self.max_omega = max_omega
+        self.gravity = gravity
         self.alt_pid = PIDController(kp=0.1, ki=0.005, kd=0.1, limit=0.25)
         self.speed_pid = PIDController(kp=0.03, ki=0.002, kd=0.01, limit=0.20)
         self.pitch_pid = PIDController(kp=0.6, ki=0.05, kd=0.4, limit=0.2)
@@ -36,20 +36,20 @@ class FinalPIDCascade:
         desired_pitch = np.clip(pitch_from_alt + pitch_from_speed, -0.35, 0.35)
         vtail_cmd = -self.pitch_pid.compute(desired_pitch, current_pitch, 0.01)
         altitude_error = ref_alt - current_alt
-        total_thrust = (self.mass * 9.81) + (altitude_error * 0.5)
+        total_thrust = (self.mass * self.gravity) + (altitude_error * 0.5)
         omega_cmd = np.sqrt(max(total_thrust, 0.0) / self.k_thrust)
-        omega_cmd = np.clip(omega_cmd, 0.0, 3000.0)
+        omega_cmd = np.clip(omega_cmd, 0.0, self.max_omega)
         return {"omega": omega_cmd, "tilt": ref_tilt,
                 "delta_left": vtail_cmd, "delta_right": vtail_cmd}
 
 
 def run_master(gust_sigma=3.5, seed=99, duration=20.0, dt=0.01):
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=1.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1, 0.1, 0.2]), aero=aero)
-    controller = FinalPIDCascade(5.0, 1e-5)
-    ref = ReferenceTrajectory("configs/robust_corridor.csv", speed_max=12.0)
+    aircraft = load_aircraft_parameters()
+    if len(aircraft.motor_positions) != 4:
+        raise ValueError("this simulation requires exactly four rotors")
+    dyn = build_aircraft_dynamics(aircraft)
+    controller = FinalPIDCascade(aircraft.mass, 4 * aircraft.k_thrust, aircraft.max_omega, aircraft.gravity)
+    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
     wind = DrydenGust(sigma=(gust_sigma, gust_sigma, gust_sigma * 0.6), airspeed=12.0, seed=seed)
 
     state = AircraftState()
@@ -63,7 +63,7 @@ def run_master(gust_sigma=3.5, seed=99, duration=20.0, dt=0.01):
         cmd = controller.compute(t, state, r["altitude"], r["speed"], r["tilt"])
         wind_vec = wind.step(dt)
         state.vel = state.vel + wind_vec
-        state = dyn.step(state, cmd["omega"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+        state = step_collective(dyn, state, cmd, dt)
         state.vel = state.vel - wind_vec
         log["t"].append(t)
         log["alt"].append(-state.pos[2])
@@ -85,6 +85,8 @@ def main():
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
     print(result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+    if result.returncode:
+        raise RuntimeError(f"Test suite failed (exit {result.returncode}):\n{result.stderr}")
 
     # 2. Master simulation plot
     print("\n[2/3] Running master simulation (PID + gusts)...")
@@ -120,47 +122,18 @@ def main():
 
     # 3. Write report
     print("\n[3/3] Writing project summary report...")
-    report = f"""# Tilt-Rotor Transition Project — Final Report
+    report = f"""# Tilt-Rotor Transition Simulation Summary
 
-## Controller Selected: PID Cascade
-
-After Monte Carlo analysis of three controller architectures under random Dryden wind gusts,
-**the PID cascade controller was selected** as the primary transition controller.
-
-### Controller Comparison (100 runs each, gust σ = 0.5–5.5 m/s)
-
-| Controller | Crashes | Mean Altitude Loss |
-|------------|---------|-------------------|
-| **PID** | 1/100 | 11.51 m |
-| INDI | 23/100 | 31.38 m |
-| INDI + DOB | 21/100 | 30.89 m |
-
-**Conclusion:** INDI's fixed-B-matrix assumption is architecturally incompatible
-with this aircraft's large variation in control effectiveness across the transition
-envelope. A Disturbance Observer augmentation reduced crashes by only 2%, which
-is not statistically significant. PID's "dumb" architecture survives because it
-does not depend on an accurate aerodynamic model.
-
-### Final Master Simulation
+### Master Simulation
 
 - Max altitude loss: {max_loss:.2f} m
 - Max pitch excursion: {max_pitch:.2f} deg
 - Peak gust encountered: {max_wind:.2f} m/s
 
-### Key Deliverables
-
-- **Physics engine**: 6-DOF rigid body + V-tail aero + rotor model
-- **Controller**: Cascade PID (altitude/speed → pitch → V-tail)
-- **Corridor**: CasADi/IPOPT-optimized robust corridor (`configs/robust_corridor.csv`)
-- **Wind model**: Dryden turbulence (aerospace standard)
-- **Validation**: 200+ unit tests + 400+ Monte Carlo simulations
-
-### Recommendations for Real Flight
-
-1. Use the PID cascade controller as-is.
-2. Use the robust corridor with the tilt rate cap at 85% of actuator limit.
-3. Limit operation to gusts below 4.5 m/s (crashes 0/100 below this threshold).
-4. Do not deploy INDI in its current form.
+This simulation uses the aircraft configuration and equal RPM for all four rotors.
+The existing corridor CSV is a reference input; it is not automatically
+re-optimized when aircraft parameters change. These results do not demonstrate
+trim, independent rotor compensation, or readiness for flight.
 
 ---
 Generated by scripts/finalize.py
@@ -175,10 +148,7 @@ Generated by scripts/finalize.py
     print("\nFiles created:")
     print("  - FINAL_SELECTED_CONTROLLER.png  (master simulation plot)")
     print("  - PROJECT_REPORT.md              (engineering summary)")
-    print("\nProject is ready for:")
-    print("  - Academic submission")
-    print("  - Flight test planning")
-    print("  - Portfolio / job application")
+    print("\nSimulation results are not flight-validation evidence.")
     print("=" * 70)
 
 

@@ -8,35 +8,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # --- IMPORTS FROM YOUR EXISTING PROJECT (only the controller and reference) ---
-from src.control.cascade import CascadeController
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
 from src.control.trajectory import ReferenceTrajectory
 
 # --- INDEPENDENT DYNAMICS (written from scratch, no src.dynamics imports) ---
 
 class IndependentDynamics:
     """A minimal, independent 6-DOF integrator for cross-checking."""
-    def __init__(self, mass=5.0, inertia=(0.1, 0.1, 0.2)):
-        self.m = mass
-        self.I = np.array(inertia)
-        self.g = 9.81
+    def __init__(self, aircraft):
+        self.aircraft = aircraft
+        self.m = aircraft.mass
+        self.I = np.array([aircraft.inertia_xx, aircraft.inertia_yy, aircraft.inertia_zz])
+        self.g = aircraft.gravity
         # State: pos(3), vel(3), euler(3), omega(3)
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
         self.euler = np.zeros(3)  # roll, pitch, yaw
         self.omega = np.zeros(3)
+        self.tilt = 0.0
 
-    def step(self, thrust, tilt, delta_vtail, dt):
+    def step(self, omega, tilt, delta_vtail, dt):
         # Simple Euler integration (independent of your semi-implicit implementation)
         roll, pitch, yaw = self.euler
 
         # 1. Thrust in body frame (tilt=0 -> -Z up, tilt=pi/2 -> +X forward)
         # Using the same sign convention as your main code for fair comparison
-        Fx_body = thrust * np.sin(tilt)
-        Fz_body = -thrust * np.cos(tilt)
+        thrust = self.aircraft.k_thrust * min(max(omega, 0.0), self.aircraft.max_omega)**2
+        Fx_body = 0.0
+        Fz_body = 0.0
+        rotor_pitch_moment = 0.0
+        pivot_x, pivot_z = self.aircraft.tilt_pivot_xz_m
+        for x, _y, z, tilts in self.aircraft.motor_positions:
+            rotor_tilt = tilt if tilts else 0.0
+            if tilts:
+                rel_x, rel_z = x - pivot_x, z - pivot_z
+                x = pivot_x + rel_x * np.cos(tilt) + rel_z * np.sin(tilt)
+                z = pivot_z - rel_x * np.sin(tilt) + rel_z * np.cos(tilt)
+            fx = thrust * np.sin(rotor_tilt)
+            fz = -thrust * np.cos(rotor_tilt)
+            Fx_body += fx
+            Fz_body += fz
+            rotor_pitch_moment += z * fx - x * fz
 
         # 2. V-tail pitch moment (simplified linear model, independent derivation)
         # Positive delta -> nose down (same as your code)
-        My = -50.0 * delta_vtail * (abs(self.vel[0]) + 1.0)  # crude speed-dependent moment
+        My = rotor_pitch_moment - 50.0 * delta_vtail * (abs(self.vel[0]) + 1.0)
 
         # 3. Rotate body forces to world frame (standard rotation matrix)
         c_r, s_r = np.cos(roll), np.sin(roll)
@@ -68,21 +85,14 @@ class IndependentDynamics:
         self.omega[1] += alpha_pitch * dt
         # Simplified kinematics: euler rate = body rate (valid for small angles)
         self.euler += self.omega * dt
+        self.tilt = float(tilt)
 
         return self
 
 def run_main_sim(duration, dt, controller, ref):
     """Run the main simulation (uses your existing dynamics via a simplified wrapper)."""
     from src.dynamics.state import AircraftState
-    from src.dynamics.rotor import RotorModel
-    from src.dynamics.tiltrotor import TiltrotorDynamics
-    from src.aero.vtail import VtailModel
-    from src.aero.aerodynamics import AeroModel
-
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=1.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1,0.1,0.2]), aero=aero)
+    dyn = build_aircraft_dynamics(load_aircraft_parameters())
 
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, -100.0])
@@ -93,7 +103,7 @@ def run_main_sim(duration, dt, controller, ref):
         t = i * dt
         r = ref.at(t)
         cmd = controller.compute(t, state, r["altitude"], r["speed"], r["tilt"])
-        state = dyn.step(state, cmd["omega"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+        state = step_collective(dyn, state, cmd, dt)
         log["t"].append(t)
         log["alt"].append(-state.pos[2])
         log["pitch"].append(np.rad2deg(state.att[1]))
@@ -101,7 +111,7 @@ def run_main_sim(duration, dt, controller, ref):
 
 def run_independent_sim(duration, dt, controller, ref):
     """Run the independent dynamics with the same controller commands."""
-    dyn = IndependentDynamics()
+    dyn = IndependentDynamics(load_aircraft_parameters())
     dyn.pos = np.array([0.0, 0.0, -100.0])
 
     log = {"t": [], "alt": [], "pitch": []}
@@ -116,14 +126,11 @@ def run_independent_sim(duration, dt, controller, ref):
         s.vel = dyn.vel
         s.att = dyn.euler
         s.omega = dyn.omega
+        s.tilt = dyn.tilt
 
         cmd = controller.compute(t, s, r["altitude"], r["speed"], r["tilt"])
 
-        # Convert omega_cmd to thrust for the independent model
-        # (approximate: assume hover thrust at omega_hover, scale by (omega/omega_hover)^2)
-        thrust = 1e-5 * (cmd["omega"] ** 2)
-
-        dyn.step(thrust, r["tilt"], cmd["delta_left"], dt)
+        dyn.step(cmd["omega"], cmd["tilt"], cmd["delta_left"], dt)
         log["t"].append(t)
         log["alt"].append(-dyn.pos[2])
         log["pitch"].append(np.rad2deg(dyn.euler[1]))
@@ -133,11 +140,10 @@ def main():
     print("Running SIL cross-check...")
     dt = 0.01
     duration = 15.0
-    ref = ReferenceTrajectory("configs/robust_corridor.csv", speed_max=12.0)
-    controller = CascadeController(mass=5.0, k_thrust=1e-5, hover_omega=np.sqrt(5.0*9.81/1e-5))
-
-    main_log = run_main_sim(duration, dt, controller, ref)
-    indep_log = run_independent_sim(duration, dt, controller, ref)
+    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
+    aircraft = load_aircraft_parameters()
+    main_log = run_main_sim(duration, dt, build_collective_controller(aircraft), ref)
+    indep_log = run_independent_sim(duration, dt, build_collective_controller(aircraft), ref)
 
     # Comparison
     print("\n=== SIL Cross-Check Comparison ===")

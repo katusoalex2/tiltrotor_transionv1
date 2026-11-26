@@ -8,11 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.dynamics.state import AircraftState
-from src.dynamics.rotor import RotorModel
-from src.dynamics.tiltrotor import TiltrotorDynamics
-from src.aero.vtail import VtailModel
-from src.aero.aerodynamics import AeroModel
-from src.control.cascade import CascadeController
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
 from src.control.reference import TransitionReference
 
 
@@ -21,13 +18,9 @@ def main():
     duration = 15.0
     transition_time = 10.0
     
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=0.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1, 0.1, 0.2]), aero=aero)
-    
-    omega_hover = np.sqrt(dyn.mass * 9.81 / rotor.k_thrust)
-    controller = CascadeController(mass=5.0, k_thrust=1e-5, hover_omega=omega_hover)
+    aircraft = load_aircraft_parameters()
+    dyn = build_aircraft_dynamics(aircraft)
+    controller = build_collective_controller(aircraft)
     ref = TransitionReference(start_altitude=100.0, target_speed=20.0, transition_time=transition_time)
 
     state = AircraftState()
@@ -41,7 +34,7 @@ def main():
         r = ref.at(t)
         
         cmd = controller.compute(t, state, r["altitude"], r["speed"], r["tilt"])
-        state = dyn.step(state, cmd["omega"], cmd["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+        state = step_collective(dyn, state, cmd, dt)
         
         log["t"].append(t)
         log["alt"].append(-state.pos[2])

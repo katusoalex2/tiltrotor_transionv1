@@ -173,12 +173,18 @@ def test_computed_corridor_displays_unqualified_trim_points(monkeypatch):
         item.value for item in app.dataframe
         if "Constraint" in item.value.columns
     )
-    stability_row = summary.loc[summary["Constraint"] == "Static derivative signs"].iloc[0]
+    stability_row = summary.loc[
+        summary["Constraint"] == "Full static derivative signs (including Cl_beta)"
+    ].iloc[0]
     assert stability_row["Assessed cells"] == np.count_nonzero(
-        result["analytic_mask"] & result["stability_map"]["assessment_mask"]
+        result["analytic_mask"] & result["static_stability_assessed_mask"]
     )
-    assert not result["known_constraints_mask"].any()
-    assert any("No grid cells pass the known corridor filters" in item.value for item in app.warning)
+    assessed_trim_points = result["stability_map"]["assessment_mask"]
+    assert np.all(
+        result["static_stability_status"][assessed_trim_points] == "unassessed"
+    )
+    assert not result["qualified_mask"].any()
+    assert any("Cl_beta) is unassessed" in item.value for item in app.warning)
     assert any("Simulation stopped" in item.value for item in app.warning)
 
     histories = observed["histories"]

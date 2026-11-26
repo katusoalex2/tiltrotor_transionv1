@@ -2341,7 +2341,7 @@ with corridor_tab:
                 name="Known filters pass; incomplete",
                 hovertemplate=(
                     "Airspeed: %{x:.1f} m/s<br>Tilt: %{y:.0f}°"
-                    "<br>Electrical/motor-slew filters may be unresolved"
+                    "<br>Cl_beta, electrical or motor-slew assessment may be unresolved"
                     "<extra></extra>"
                 ),
             ))
@@ -2489,6 +2489,21 @@ with corridor_tab:
         report.metric(status_columns[2], "Electrical cells assessed", str(electrical_assessed_count))
         report.metric(status_columns[3], "Motor slew cells assessed", str(slew_assessed_count))
         report.metric(status_columns[4], "All configured filters pass", str(qualified_count))
+        point_statuses = np.asarray(
+            current_corridor_result["point_screen_status"],
+            dtype=object,
+        )
+        point_status_counts = {
+            status: int(np.count_nonzero(point_statuses == status))
+            for status in ("pass", "fail", "incomplete")
+        }
+        report.text("caption", st,
+            "Steady point screen: "
+            f"{point_status_counts['pass']} pass, "
+            f"{point_status_counts['fail']} fail, "
+            f"{point_status_counts['incomplete']} incomplete. "
+            "Path-level tilt-rate and motor-slew constraints are reported separately."
+        )
         trim_mask = np.asarray(current_corridor_result["trim_mask"], dtype=bool)
         pitch_mask = np.asarray(current_corridor_result["pitch_moment_mask"], dtype=bool)
         stability_mask = np.asarray(
@@ -2496,7 +2511,11 @@ with corridor_tab:
             dtype=bool,
         )
         stability_assessed = np.asarray(
-            current_corridor_result["stability_map"]["assessment_mask"],
+            current_corridor_result["static_stability_assessed_mask"],
+            dtype=bool,
+        )
+        known_stability_mask = np.asarray(
+            current_corridor_result["known_static_stability_mask"],
             dtype=bool,
         )
         gust_mask = np.asarray(current_corridor_result["gust_mask"], dtype=bool)
@@ -2517,7 +2536,15 @@ with corridor_tab:
                 analytic_count,
             ),
             (
-                "Static derivative signs",
+                "Modeled pitch/yaw derivative signs",
+                int(np.count_nonzero(analytic_mask & known_stability_mask)),
+                int(np.count_nonzero(
+                    analytic_mask
+                    & current_corridor_result["stability_map"]["assessment_mask"]
+                )),
+            ),
+            (
+                "Full static derivative signs (including Cl_beta)",
                 int(np.count_nonzero(analytic_mask & stability_mask)),
                 int(np.count_nonzero(analytic_mask & stability_assessed)),
             ),
@@ -2546,6 +2573,16 @@ with corridor_tab:
         missing_electrical = tuple(
             current_corridor_result["electrical_missing_parameters"]
         )
+        cl_beta_assessed = np.asarray(
+            current_corridor_result["stability_map"]["cl_beta_assessed"],
+            dtype=bool,
+        )
+        if not np.any(analytic_mask & cl_beta_assessed):
+            report.text("warning", st,
+                "Lateral roll stability (Cl_beta) is unassessed because the current "
+                "aerodynamic model has no sideslip-to-roll moment response. This does "
+                "not prove instability; full corridor qualification remains blocked."
+            )
         if missing_electrical:
             report.text("warning", st,
                 "Electrical feasibility is not assessed; fill these profile fields with "

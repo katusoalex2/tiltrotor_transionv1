@@ -187,7 +187,9 @@ def _envelope_analysis(dynamics):
 def _optimizer_analysis():
     st.warning(
         "Separate fixed-parameter 2D point-mass optimization, not the live aircraft simulation. "
-        "It omits pitch-moment balance, rotor wash, gusts and electrical limits."
+        "It enforces quasi-steady pitch-moment balance and configured V-tail travel, "
+        "but omits pitch rotational dynamics, tail rate, rotor wash and gust constraints. "
+        "An infeasible result means the selected model scenario has no solution under those limits."
     )
     st.caption("Scenario: 5 kg, 1.5 m² wing, 15 s, 12 m/s target, 40 N per rotor pair. Dashboard aircraft controls do not change this scenario.")
     if st.button("Run reduced-order optimization", key="extra_run_optimizer"):

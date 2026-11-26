@@ -7,13 +7,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.dynamics.reduced_transition import altitude_acceleration
 
 
 # --- Problem parameters ---
 N = 50                      # Number of control segments (time samples)
 T_TOTAL = 15.0              # Total time (s)
 DT = T_TOTAL / N            # Timestep per segment
-MAX_TILT_RATE = 0.35        # rad/s
 ALT_MIN = 90.0              # Minimum altitude (m)
 ALT_START = 100.0           # Starting altitude (m)
 TILT_MAX = np.pi / 2        # 90 deg
@@ -25,31 +26,14 @@ TILT_MAX = np.pi / 2        # 90 deg
 #   alt_dot = v_z
 #   v_z_dot = (thrust_vert + lift - m*g) / m
 #
-# Where:
-#   thrust_vert = k_thrust * omega^2 * cos(tilt)
-#   lift = 0.5 * rho * wing_area * CL * V^2
-#       (approximated as a function of tilt: 0 at 0 deg, max at 90 deg)
-def altitude_dynamics(tilt, vz, alt):
-    """Approximate vertical acceleration given state."""
-    mass = 5.0
-    g = 9.81
-    k_thrust = 1e-5
-    omega_hover = np.sqrt(mass * g / k_thrust)  # ~2215 rad/s
-    thrust_vert = k_thrust * (omega_hover ** 2) * np.cos(tilt)
-    
-    # Lift builds up with tilt (approximation: linear in tilt)
-    rho = 1.225
-    wing_area = 1.5
-    v_forward = 12.0 * (tilt / TILT_MAX)  # approximate speed
-    CL = 0.5
-    lift = 0.5 * rho * wing_area * CL * (v_forward ** 2) * np.sin(tilt)
-    
-    a_z = (thrust_vert + lift - mass * g) / mass
-    return a_z
+def altitude_dynamics(tilt, vz, alt, aircraft=None):
+    """Approximate vertical acceleration; not a trim analysis."""
+    return altitude_acceleration(tilt, aircraft if aircraft is not None else load_aircraft_parameters())
 
 
 def main():
     print("Setting up CasADi optimization...")
+    aircraft = load_aircraft_parameters()
     opti = ca.Opti()
 
     # --- Decision variables ---
@@ -66,7 +50,7 @@ def main():
 
     # --- Constraints: dynamics ---
     for k in range(N):
-        a_z = altitude_dynamics(tilt[k], vz[k], alt[k])
+        a_z = altitude_dynamics(tilt[k], vz[k], alt[k], aircraft)
         opti.subject_to(alt[k + 1] == alt[k] + vz[k] * DT)
         opti.subject_to(vz[k + 1] == vz[k] + a_z * DT)
         opti.subject_to(tilt[k + 1] == tilt[k] + tilt_dot[k] * DT)
@@ -80,7 +64,7 @@ def main():
 
     # --- Bounds ---
     opti.subject_to(opti.bounded(0.0, tilt, TILT_MAX))
-    opti.subject_to(opti.bounded(-MAX_TILT_RATE, tilt_dot, MAX_TILT_RATE))
+    opti.subject_to(opti.bounded(-aircraft.max_tilt_rate, tilt_dot, aircraft.max_tilt_rate))
     opti.subject_to(opti.bounded(ALT_MIN, alt, ALT_START + 10.0))
     opti.subject_to(opti.bounded(-5.0, vz, 5.0))
 
@@ -98,12 +82,7 @@ def main():
     opti.set_initial(max_loss, 5.0)
 
     print("Solving with IPOPT (this may take 10-30 seconds)...")
-    try:
-        sol = opti.solve()
-    except RuntimeError as e:
-        print(f"\nIPOPT failed: {e}")
-        print("Falling back to solution from last iterate (still useful)...")
-        sol = opti.debug
+    sol = opti.solve()
 
     # --- Extract solution ---
     tilt_opt = np.array(sol.value(tilt))

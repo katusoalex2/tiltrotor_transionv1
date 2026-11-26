@@ -1,30 +1,69 @@
-# AIRCRAFT CONFIGURATION FORM
-# This configuration file defines the physical properties, rotor and motor characteristics, cruise altitude settings, and PID gains for a specific aircraft. It is structured in YAML format for easy readability and modification.
+# Aircraft inputs for migrated backend analyses. Example values, not flight-validated.
+# Load with src.configuration.aircraft_parameters.load_aircraft_parameters().
+# Older scripts may still use hard-coded values and must be migrated separately.
+# The upgraded collective simulations use the same RPM for every rotor; they do
+# not calculate independent rear compensation or establish a trimmed corridor.
+# KV * cells * cell_voltage_v is an approximate no-load RPM, not measured thrust
+# or a verified loaded motor limit. The speed factor is an explicit assumption.
+# Coordinates: body x forward, y right, z down; metres from the CG.
+mass: 5.0                       # kg, configured but unverified all-up mass
+inertia_xx: 0.1                 # kg m^2
+inertia_yy: 0.1
+inertia_zz: 0.2
 
-# --- Aircraft Physical Properties ---
-mass: 5.0                 # kg
-inertia_xx: 0.1           # kg*m^2 (Roll)
-inertia_yy: 0.1           # kg*m^2 (Pitch)
-inertia_zz: 0.2           # kg*m^2 (Yaw)
-flap: 0.0                 # Placeholder 
+battery_cells: 6                # cells in series (6S)
+cell_voltage_v: 3.7             # assumed voltage per cell; nominal LiPo
+motor_kv_rpm_per_volt: 920.0
+motor_speed_factor: 1.0         # assumed loaded / no-load speed; 1 = optimistic
+k_thrust: 1.0e-5               # N / (rad/s)^2, per rotor
+motor_resistance_ohm: 0.173       # fill from motor specification
+motor_no_load_current_a: 0.3    # fill from motor specification
+motor_continuous_current_a: 25 # fill from motor specification
+rear_thrust_reserve_fraction: 0.1 # fraction of rear-rotor maximum thrust kept unused
+prop_diameter_m: 0.3048
+prop_mass_kg: 0.010
+propeller_torque_coefficient_nm_s2_rad2: 4.6e-9 # fill from prop data or test
+battery_internal_resistance_ohm: 0.042 # pack resistance under relevant conditions
+battery_capacity_ah: 5.2        # pack capacity in Ah
+battery_c_rating: 50           # continuous/discharge C rating
+battery_continuous_current_a: 260 # pack continuous current limit
+esc_efficiency: 0.90              # 0-1; fill from ESC data
+esc_continuous_current_a: 30    # ESC continuous current limit per ESC
+max_tilt_rate: 0.35            # rad/s
+tilt_pivot_xz_m: [0.1, 0.0]
+motor_positions:               # x, y, z, tilts
+  - [0.3, -0.4, 0.0, true]
+  - [0.3,  0.4, 0.0, true]
+  - [-0.3, -0.4, 0.0, false]
+  - [-0.3,  0.4, 0.0, false]
 
-# --- Rotor & Motor Properties ---
-motor_location_x: 0.3     # meters forward of CG
-motor_location_y: 0.3     # meters right of CG
-motor_location_z: 0.0     # meters down of CG
-k_thrust: 0.00001         # Rotor thrust coefficient (k)
-max_omega: 3000.0         # Maximum motor RPM (rad/s)
-max_tilt_rate: 0.35       # Maximum tilt speed (rad/s)
-
-# --- Cruise Altitude Settings ---
-cruise_altitude: 700.0    # Target altitude in meters
-
-# --- PID Gains: HOVER (Tilt = 0 deg) ---
-hover_kp: 1.2
-hover_ki: 0.1
-hover_kd: 0.9
-
-# --- PID Gains: CRUISE (Tilt = 90 deg) ---
-cruise_kp: 0.05
-cruise_ki: 0.001
-cruise_kd: 0.001
+wingspan: 2.0                  # m, full span
+root_chord: 0.4                # m
+tip_chord: 0.2                 # m
+wing_root_le_x_m: 0.1          # root leading edge relative to CG, m
+wing_tip_le_x_m: 0.05          # tip leading edge relative to CG, m
+fuselage_length_m: 1.6
+wing_lift_coefficient_zero: 0.1 # assumed; replace with validated aero data
+wing_lift_slope: 4.0           # per radian; assumed
+wing_stall_angle_deg: 15.0     # assumed
+wing_drag_coeff: 0.02           # assumed
+oswald_efficiency: 0.8          # assumed
+wing_aerodynamic_center_fraction_mac: 0.25 # quarter-MAC model assumption
+wing_pitch_moment_zero: -0.05   # assumed
+wing_pitch_moment_slope: -0.5   # per radian; assumed
+vtail_area: 0.1                # m^2
+vtail_root_le_x_m: -0.6
+vtail_root_chord_m: 0.2
+vtail_tip_le_x_m: -0.5
+vtail_tip_y_m: 0.3
+vtail_tip_z_m: -0.15
+vtail_tip_chord_fraction: 0.5  # assumed by the existing V-tail mesh generator
+vtail_aerodynamic_center_fraction_chord: 0.25 # quarter-chord AC assumption
+vtail_lift_slope: 3.5          # per radian; assumed
+vtail_drag_coeff: 0.015         # assumed
+vtail_aspect_ratio: 4.0
+vtail_oswald_efficiency: 0.8
+vtail_max_lift_coefficient: 1.5 # assumed
+vtail_max_deflection_deg: 11.4591559 # CAD/design target; actuator limit unverified
+air_density: 1.225             # kg/m^3
+gravity: 9.81                  # m/s^2

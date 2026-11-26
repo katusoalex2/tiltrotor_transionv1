@@ -5,6 +5,52 @@ from src.dynamics.rotor import RotorModel
 from src.dynamics.tiltrotor import GRAVITY, TiltrotorDynamics
 from src.aero.vtail import VtailModel
 from src.aero.aerodynamics import AeroModel
+from src.aero.wing_polar import wing_lift_drag_coefficients
+
+
+def test_shared_wing_polar_has_continuous_stall_and_post_stall_decay():
+    kwargs = dict(
+        cl_zero=0.1,
+        lift_slope_per_rad=4.0,
+        stall_angle_rad=np.deg2rad(15.0),
+        cd_zero=0.02,
+        aspect_ratio=6.0,
+        oswald_efficiency=0.8,
+    )
+    stall = kwargs["stall_angle_rad"]
+    cl_at_stall, _ = wing_lift_drag_coefficients(stall, **kwargs)
+    cl_post_stall, _ = wing_lift_drag_coefficients(np.deg2rad(30.0), **kwargs)
+    cl_negative, _ = wing_lift_drag_coefficients(-stall, **kwargs)
+
+    assert float(cl_at_stall) == pytest.approx(0.1 + 4.0 * stall)
+    assert float(cl_post_stall) < float(cl_at_stall)
+    assert float(cl_negative) == pytest.approx(0.1 - 4.0 * stall)
+
+
+def test_aerodynamic_model_uses_shared_post_stall_polar():
+    aero = AeroModel(
+        wing_area=0.6,
+        vtail=VtailModel(area=0.1, arm_length=0.5),
+        rho=1.225,
+    )
+    alpha = np.deg2rad(30.0)
+    speed = 12.0
+    velocity = np.array([speed * np.cos(alpha), 0.0, speed * np.sin(alpha)])
+    force, _, _, _, _ = aero.compute_forces_and_moments(
+        velocity, np.zeros(3), np.zeros(3), 0.0, 0.0,
+    )
+    cl, _ = wing_lift_drag_coefficients(
+        alpha,
+        cl_zero=aero.CL_0,
+        lift_slope_per_rad=aero.CL_alpha,
+        stall_angle_rad=aero.stall_angle,
+        cd_zero=aero.CD_0,
+        aspect_ratio=aero.AR,
+        oswald_efficiency=aero.oswald_efficiency,
+    )
+    expected_lift = 0.5 * aero.rho * speed**2 * aero.wing_area * float(cl)
+
+    assert -force[2] == pytest.approx(expected_lift)
 
 def test_rotor_thrust_squared_law():
     rotor = RotorModel(k_thrust=1.2e-5, max_omega=1000.0)

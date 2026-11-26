@@ -8,20 +8,19 @@ import time
 import numpy as np
 
 from src.dynamics.state import AircraftState
-from src.dynamics.rotor import RotorModel
-from src.dynamics.tiltrotor import TiltrotorDynamics
-from src.aero.vtail import VtailModel
-from src.aero.aerodynamics import AeroModel
-from src.control.cascade import CascadeController
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, step_collective
 from src.control.trajectory import ReferenceTrajectory
 from src.control.pid import PIDController
 from src.wind.gust import DrydenGust
 
 
 class PIDCascade:
-    def __init__(self, mass, k_thrust):
+    def __init__(self, mass, k_thrust, max_omega, gravity):
         self.mass = mass
         self.k_thrust = k_thrust
+        self.max_omega = max_omega
+        self.gravity = gravity
         self.alt_pid = PIDController(kp=0.1, ki=0.005, kd=0.1, limit=0.25)
         self.speed_pid = PIDController(kp=0.03, ki=0.002, kd=0.01, limit=0.20)
         self.pitch_pid = PIDController(kp=0.6, ki=0.05, kd=0.4, limit=0.2)
@@ -35,9 +34,9 @@ class PIDCascade:
         desired_pitch = np.clip(pitch_from_alt + pitch_from_speed, -0.35, 0.35)
         vtail_cmd = -self.pitch_pid.compute(desired_pitch, current_pitch, 0.01)
         altitude_error = ref_alt - current_alt
-        total_thrust = (self.mass * 9.81) + (altitude_error * 0.5)
+        total_thrust = (self.mass * self.gravity) + (altitude_error * 0.5)
         omega_cmd = np.sqrt(max(total_thrust, 0.0) / self.k_thrust)
-        omega_cmd = np.clip(omega_cmd, 0.0, 3000.0)
+        omega_cmd = np.clip(omega_cmd, 0.0, self.max_omega)
         return {"omega": omega_cmd, "tilt": ref_tilt,
                 "delta_left": vtail_cmd, "delta_right": vtail_cmd}
 
@@ -49,12 +48,12 @@ def single_run(dt, duration, seed, with_profiling=False):
 
     # --- Setup ---
     t0 = time.time()
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=1.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1, 0.1, 0.2]), aero=aero)
-    controller = PIDCascade(5.0, 1e-5)
-    ref = ReferenceTrajectory("configs/robust_corridor.csv", speed_max=12.0)
+    aircraft = load_aircraft_parameters()
+    if len(aircraft.motor_positions) != 4:
+        raise ValueError("this simulation requires exactly four rotors")
+    dyn = build_aircraft_dynamics(aircraft)
+    controller = PIDCascade(aircraft.mass, 4 * aircraft.k_thrust, aircraft.max_omega, aircraft.gravity)
+    ref = ReferenceTrajectory(os.path.join(os.path.dirname(__file__), "..", "UAM Configurations", "robust_corridor.csv"), speed_max=12.0)
     wind = DrydenGust(sigma=(2.5, 2.5, 1.5), airspeed=12.0, seed=seed)
     state = AircraftState()
     state.pos = np.array([0.0, 0.0, -100.0])
@@ -71,7 +70,7 @@ def single_run(dt, duration, seed, with_profiling=False):
         cmd = controller.compute(t, state, r["altitude"], r["speed"], r["tilt"])
         wind_vec = wind.step(dt)
         state.vel = state.vel + wind_vec
-        state = dyn.step(state, cmd["omega"], r["tilt"], cmd["delta_left"], cmd["delta_right"], dt)
+        state = step_collective(dyn, state, cmd, dt)
         state.vel = state.vel - wind_vec
         alt_hist[i] = -state.pos[2]
     timers["sim_loop"] = time.time() - t0

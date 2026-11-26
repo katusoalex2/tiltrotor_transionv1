@@ -9,11 +9,8 @@ import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
 from src.dynamics.state import AircraftState
-from src.dynamics.rotor import RotorModel
-from src.dynamics.tiltrotor import TiltrotorDynamics
-from src.aero.vtail import VtailModel
-from src.aero.aerodynamics import AeroModel
-from src.control.cascade import CascadeController
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.configuration.aircraft_models import build_aircraft_dynamics, build_collective_controller, step_collective
 from src.control.reference import TransitionReference
 
 
@@ -22,7 +19,6 @@ N_PIECES = 5               # Number of tilt profile segments
 DURATION = 20.0            # Fixed total time budget
 DT = 0.02                  # Simulation timestep (coarser for speed)
 
-MAX_TILT_RATE = 0.35       # rad/s = 20 deg/s
 MAX_ALT_LOSS = 10.0        # meters
 MAX_SPEED = 20.0           # m/s
 
@@ -33,13 +29,9 @@ def simulate(tilt_profile: np.ndarray, duration: float = DURATION) -> dict:
     tilt_profile: array of N_PIECES values, each is tilt angle at the end of
                   the corresponding time segment. Should start at 0 and end at pi/2.
     """
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    vtail = VtailModel(area=0.1, arm_length=0.5)
-    aero = AeroModel(wing_area=1.5, vtail=vtail)
-    dyn = TiltrotorDynamics(mass=5.0, rotor=rotor, inertia=np.array([0.1, 0.1, 0.2]), aero=aero)
-
-    omega_hover = np.sqrt(dyn.mass * 9.81 / rotor.k_thrust)
-    controller = CascadeController(mass=5.0, k_thrust=1e-5, hover_omega=omega_hover)
+    aircraft = load_aircraft_parameters()
+    dyn = build_aircraft_dynamics(aircraft)
+    controller = build_collective_controller(aircraft)
     ref = TransitionReference(start_altitude=100.0, target_speed=12.0, transition_time=duration)
 
     state = AircraftState()
@@ -62,7 +54,7 @@ def simulate(tilt_profile: np.ndarray, duration: float = DURATION) -> dict:
         current_tilt = tilt_schedule[i]
         r = ref.at(t)
         cmd = controller.compute(t, state, r["altitude"], r["speed"], current_tilt)
-        state = dyn.step(state, cmd["omega"], current_tilt, cmd["delta_left"], cmd["delta_right"], DT)
+        state = step_collective(dyn, state, cmd, DT)
         alt_history.append(-state.pos[2])
         speed_history.append(state.vel[0])
 
@@ -93,7 +85,7 @@ def constraint_tilt_rate(tilt_profile: np.ndarray) -> float:
         rate = abs(t - prev) / dt_seg
         if rate > max_rate: max_rate = rate
         prev = t
-    return MAX_TILT_RATE - max_rate  # >= 0 means satisfied
+    return load_aircraft_parameters().max_tilt_rate - max_rate  # >= 0 means satisfied
 
 
 def constraint_tilt_end(tilt_profile: np.ndarray) -> float:

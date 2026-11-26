@@ -108,17 +108,15 @@ def test_pid_diagnostic_detects_changed_profile(monkeypatch, tmp_path):
     assert not any("Maximum absolute altitude error" in item.label for item in app.metric)
 
 
-def test_optimizer_displays_result_and_discards_it_on_failure(monkeypatch):
+def test_optimizer_surfaces_pitch_infeasibility_and_discards_stale_results(monkeypatch):
     from scripts import optimize_longitudinal_transition as optimizer
 
     app = AppTest.from_string(APP, default_timeout=120).run()
     app.selectbox(key="additional_transition_analysis").select("Reduced-order optimization").run()
     app.button(key="extra_run_optimizer").click().run(timeout=120)
     assert not app.exception
-    result = app.session_state["extra_optimizer_result"]
-    assert np.isclose(result["vx_mps"][-1], 12.0, atol=1e-4)
-    assert np.isclose(result["tilt_rad"][-1], np.pi / 2, atol=1e-4)
-    assert all(key in result for key in ("lift", "drag", "acceleration_x", "acceleration_up"))
+    assert any("pitch-moment balance" in item.value for item in app.error)
+    assert "extra_optimizer_result" not in app.session_state
 
     def fail():
         raise RuntimeError("solver did not converge")

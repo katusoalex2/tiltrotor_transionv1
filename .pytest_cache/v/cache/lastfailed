@@ -2,5 +2,7 @@
   "tests/test_aircraft_profile_excel.py": true,
   "tests/test_aircraft_profile_preview.py": true,
   "tests/test_dashboard_axis_labels.py": true,
-  "tests/test_simulation_report.py": true
+  "tests/test_simulation_report.py": true,
+  "tests/test_transition_dynamics.py::test_longitudinal_optimizer_solves_stall_bounded_transition": true,
+  "tests/test_dashboard_transition_analyses.py": true
 }

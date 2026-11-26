@@ -7,33 +7,25 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import numpy as np
 import casadi as ca
 import matplotlib.pyplot as plt
+from src.configuration.aircraft_parameters import load_aircraft_parameters
+from src.dynamics.reduced_transition import altitude_acceleration
 
 
 N = 50
 T_TOTAL = 15.0
 DT = T_TOTAL / N
-MAX_TILT_RATE = 0.35
 ALT_START = 100.0
 TILT_MAX = np.pi / 2
 
 
-def altitude_dynamics(tilt, vz):
+def altitude_dynamics(tilt, vz, aircraft=None):
     """Approximate vertical acceleration given tilt angle."""
-    mass = 5.0
-    g = 9.81
-    k_thrust = 1e-5
-    omega_hover = np.sqrt(mass * g / k_thrust)
-    thrust_vert = k_thrust * (omega_hover ** 2) * np.cos(tilt)
-    rho = 1.225
-    wing_area = 1.5
-    v_forward = 12.0 * (tilt / TILT_MAX)
-    CL = 0.5
-    lift = 0.5 * rho * wing_area * CL * (v_forward ** 2) * np.sin(tilt)
-    return (thrust_vert + lift - mass * g) / mass
+    return altitude_acceleration(tilt, aircraft if aircraft is not None else load_aircraft_parameters())
 
 
 def solve_corridor(objective_type: str):
     """Solve the corridor optimization with a specific objective."""
+    aircraft = load_aircraft_parameters()
     opti = ca.Opti()
 
     tilt = opti.variable(N + 1)
@@ -49,7 +41,7 @@ def solve_corridor(objective_type: str):
 
     # --- Constraints (always the same) ---
     for k in range(N):
-        a_z = altitude_dynamics(tilt[k], vz[k])
+        a_z = altitude_dynamics(tilt[k], vz[k], aircraft)
         opti.subject_to(alt[k + 1] == alt[k] + vz[k] * DT)
         opti.subject_to(vz[k + 1] == vz[k] + a_z * DT)
         opti.subject_to(tilt[k + 1] == tilt[k] + tilt_dot[k] * DT)
@@ -60,7 +52,7 @@ def solve_corridor(objective_type: str):
     opti.subject_to(vz[0] == 0.0)
     opti.subject_to(vz[N] == 0.0)
     opti.subject_to(opti.bounded(0.0, tilt, TILT_MAX))
-    opti.subject_to(opti.bounded(-MAX_TILT_RATE, tilt_dot, MAX_TILT_RATE))
+    opti.subject_to(opti.bounded(-aircraft.max_tilt_rate, tilt_dot, aircraft.max_tilt_rate))
     opti.subject_to(max_loss >= ALT_START - alt)
 
     # --- Objective selection ---
@@ -90,10 +82,7 @@ def solve_corridor(objective_type: str):
     opti.set_initial(alt, np.full(N + 1, ALT_START))
     opti.set_initial(max_loss, 5.0)
 
-    try:
-        sol = opti.solve()
-    except RuntimeError:
-        sol = opti.debug
+    sol = opti.solve()
 
     return {
         "tilt": np.array(sol.value(tilt)),

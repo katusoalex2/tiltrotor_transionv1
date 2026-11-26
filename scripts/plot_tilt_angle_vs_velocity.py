@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.dynamics.transition import transition_speed_envelope
+from src.configuration.aircraft_parameters import load_aircraft_parameters
 
 
 # Edit these strings to change the wording displayed on the graph.
@@ -24,28 +25,27 @@ OUTPUT = ROOT / "figures" / "tilt_angle_vs_velocity.png"
 
 
 def build_plot() -> Path:
-    mass = 5.0
-    wing_area = 0.6
-    density = 1.225
-    thrust_coefficient = 1e-5
-    max_rotor_speed = 3200.0
-    max_thrust_per_rotor = thrust_coefficient * max_rotor_speed**2
-    max_lift_coefficient = 0.1 + 4.0 * np.deg2rad(15.0)
+    aircraft = load_aircraft_parameters()
+    max_lift_coefficient = aircraft.wing_lift_coefficient_zero + aircraft.wing_lift_slope * np.deg2rad(aircraft.wing_stall_angle_deg)
 
     envelope = transition_speed_envelope(
-        mass=mass,
-        wing_area=wing_area,
-        max_thrust_per_rotor=max_thrust_per_rotor,
-        rotor_tilts=[True, True, False, False],
-        rho=density,
+        mass=aircraft.mass,
+        wing_area=aircraft.wing_area,
+        max_thrust_per_rotor=aircraft.max_thrust_per_rotor,
+        rotor_tilts=[position[3] for position in aircraft.motor_positions],
+        rho=aircraft.air_density,
         cl_max=max_lift_coefficient,
-        cd_0=0.02,
-        aspect_ratio=6.0,
+        cd_0=aircraft.wing_drag_coeff,
+        aspect_ratio=aircraft.wing_aspect_ratio,
+        oswald_efficiency=aircraft.oswald_efficiency,
         samples=901,
+        gravity=aircraft.gravity,
     )
 
     project_tilt_deg = envelope["tilt_deg"]
     displayed_tilt_deg = 90.0 - project_tilt_deg
+    if not np.any(envelope["feasible"]):
+        raise ValueError("no feasible points in the analytical envelope for the configured aircraft")
     max_speed = float(np.nanmax(envelope["maximum_speed_mps"]))
     speed_grid = np.linspace(0.0, max_speed, 1000)
     lower_tilt = np.full(speed_grid.shape, np.nan)
@@ -111,8 +111,8 @@ def build_plot() -> Path:
         0.99,
         0.02,
         f"{CONVENTION_NOTE}\n"
-        f"Uses kT={thrust_coefficient:g}, max rotor speed={max_rotor_speed:.0f} rad/s "
-        f"({max_thrust_per_rotor:.1f} N/rotor).\n",
+        f"Estimated speed={aircraft.max_omega:.0f} rad/s; "
+        f"thrust={aircraft.max_thrust_per_rotor:.1f} N/rotor. Not flight validated.\n",
     
         transform=axis.transAxes,
         ha="right",

@@ -11,44 +11,34 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.aero.aerodynamics import AeroModel
-from src.aero.vtail import VtailModel
+from src.configuration.aircraft_models import build_aircraft_dynamics
+from src.configuration.aircraft_parameters import load_aircraft_parameters
 from src.dynamics.frames import rotation_body_to_earth
-from src.dynamics.rotor import RotorModel, tilted_rotor_position
-from src.dynamics.tiltrotor import GRAVITY, TiltrotorDynamics
+from src.dynamics.rotor import tilted_rotor_position
 
 
 def build_dynamics():
-    rotor = RotorModel(k_thrust=1e-5, max_omega=3000.0)
-    aero = AeroModel(wing_area=1.5, vtail=VtailModel(area=0.1, arm_length=0.5))
-    dynamics = TiltrotorDynamics(
-        mass=5.0,
-        rotor=rotor,
-        inertia=np.array([0.1, 0.1, 0.2]),
-        aero=aero,
-    )
-    hover_omega = np.sqrt(dynamics.mass * 9.81 / (4.0 * rotor.k_thrust))
-    return dynamics, hover_omega
+    aircraft = load_aircraft_parameters()
+    dynamics = build_aircraft_dynamics(aircraft)
+    rotor = dynamics.rotor
+    hover_omega = np.sqrt(dynamics.mass * aircraft.gravity / (len(aircraft.motor_positions) * rotor.k_thrust))
+    if hover_omega > rotor.max_omega:
+        raise ValueError("estimated maximum rotor thrust is insufficient for hover")
+    return dynamics, hover_omega, aircraft
 
 
-def evaluate_point(dynamics, omega, airspeed, tilt_rad):
+def evaluate_point(dynamics, omega, airspeed, tilt_rad, aircraft):
     attitude = np.zeros(3)
     velocity_earth = np.array([airspeed, 0.0, 0.0])
     rotor_force_body = np.zeros(3)
     rotor_moment_body = np.zeros(3)
     thrust_each = dynamics.rotor.compute_thrust(omega, height_above_ground=100.0)
-    default_positions = [
-        [0.3, -0.4, 0.0, True],
-        [0.3, 0.4, 0.0, True],
-        [-0.3, -0.4, 0.0, False],
-        [-0.3, 0.4, 0.0, False],
-    ]
-    for position in default_positions:
+    for position in aircraft.motor_positions:
         x, y, z = position[:3]
         tilts = position[3]
         rotor_tilt = tilt_rad if tilts else 0.0
         if tilts:
-            x, y, z = tilted_rotor_position(position, rotor_tilt)
+            x, y, z = tilted_rotor_position(position, rotor_tilt, aircraft.tilt_pivot_xz_m)
         rotor_force = thrust_each * np.array([
             np.sin(rotor_tilt),
             0.0,
@@ -69,7 +59,7 @@ def evaluate_point(dynamics, omega, airspeed, tilt_rad):
     total_force_body = rotor_force_body + aero_force_body
     force_ned = rotation_body_to_earth(*attitude) @ total_force_body
     acceleration_ned = force_ned / dynamics.mass + np.array(
-        [0.0, 0.0, GRAVITY]
+        [0.0, 0.0, aircraft.gravity]
     )
     moment_body = rotor_moment_body + aero_moment_body
     return {
@@ -87,7 +77,7 @@ def main():
     output_dir = "figures"
     os.makedirs(output_dir, exist_ok=True)
 
-    dynamics, hover_omega = build_dynamics()
+    dynamics, hover_omega, aircraft = build_dynamics()
     tilt_deg = np.linspace(0.0, 90.0, 46)
     tilt_rad = np.deg2rad(tilt_deg)
     airspeeds = np.array([0.0, 5.0, 10.0, 15.0, 20.0])
@@ -106,7 +96,7 @@ def main():
 
     for speed_index, airspeed in enumerate(airspeeds):
         for tilt_index, tilt in enumerate(tilt_rad):
-            point = evaluate_point(dynamics, hover_omega, airspeed, tilt)
+            point = evaluate_point(dynamics, hover_omega, airspeed, tilt, aircraft)
             for key, value in point.items():
                 results[key][speed_index, tilt_index] = value
 
@@ -184,8 +174,9 @@ def main():
     print("Saved figures/transition_force_curves.png")
     print("Saved figures/transition_force_model_maps.png")
     print(
-        "Assumptions: 5 kg, 1.5 m² wing, zero wind, level attitude, no propwash, "
-        f"four rotors fixed at {hover_omega:.1f} rad/s."
+        f"Assumptions: {dynamics.mass:g} kg, {dynamics.aero.wing_area:g} m² wing, "
+        f"zero wind, level attitude, no propwash, "
+        f"{len(aircraft.motor_positions)} rotors fixed at {hover_omega:.1f} rad/s."
     )
     print("These are instantaneous model outputs, not a trimmed or flight-qualified corridor.")
 
